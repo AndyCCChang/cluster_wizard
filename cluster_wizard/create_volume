@@ -1,0 +1,109 @@
+#!/usr/bin/env python
+import os, sys, parted, traceback
+from ezs3.storage import *
+from optparse import OptionParser
+from _ped import disk_type_get, device_free_all
+from ezs3.defaults import BigTeraDefaultSettings as defaults
+import logging
+from ezs3.log import EZLog
+
+class SVManager:
+
+    def _make_disk_partitions(self, device, part_journal):
+        JOURNAL_SECTORS = defaults.CEPH_OSD_JOURNAL_SIZE * 2 * 1024
+        if part_journal and device.getLength() < JOURNAL_SECTORS:
+            raise RuntimeError(
+                "Disk is too small to creat a journal partition."
+            )
+
+        try:
+            disk = parted.Disk(device)
+            disk.deleteAllPartitions()
+            disk.commit()
+        except:
+            pass
+
+        disk = parted.freshDisk(device, disk_type_get("gpt"))
+        constraint = parted.Constraint(device=device)
+
+        if part_journal:
+            journal_geo = parted.Geometry(device=device, start=2048,
+                                          length=JOURNAL_SECTORS)
+            journal_partition = parted.Partition(disk=disk,
+                                                 type=parted.PARTITION_NORMAL,
+                                                 geometry=journal_geo)
+            disk.addPartition(journal_partition, constraint=constraint)
+        else:
+            JOURNAL_SECTORS = 0
+
+        data_length = device.getLength() - JOURNAL_SECTORS - 2048
+        data_geo = parted.Geometry(device=device, start=2048+JOURNAL_SECTORS,
+                                   length=data_length)
+        data_partition = parted.Partition(disk=disk,
+                                          type=parted.PARTITION_NORMAL,
+                                          geometry=data_geo)
+        disk.addPartition(data_partition, constraint=constraint)
+        disk.commit()
+
+        if part_journal:
+            return journal_partition, data_partition
+        else:
+            return None, data_partition
+
+
+    def _select_disk_partition(self, path):
+        for dev in parted.getAllDevices():
+            if dev.path != path:
+                continue
+            try:
+                disk = parted.Disk(dev)
+                for p in disk.partitions:
+                    if p.type not in [parted.PARTITION_NORMAL,
+                                      parted.PARTITION_LOGICAL]:
+                        continue
+            except Exception as e:
+                traceback.format_exc()
+                print str(e)
+            return dev
+
+def update_progress(progress):
+    sys.stdout.write("\r%d%%" % progress)
+    sys.stdout.flush()
+
+if __name__ == "__main__":
+    path = ''
+    sv_name = ''
+    usage = "Usage: %prog [options]"
+    parser = OptionParser(usage=usage)
+    parser.add_option("-p", "--path",
+                      metavar="PATH", dest="path",
+                      help="Specify path for storage volume")
+    parser.add_option("-n", "--name",
+                      metavar="NAME", dest="sv_name",
+                      help="Specify name for storage volume")
+ 
+    (options, args) = parser.parse_args()
+    if not options.path or not options.sv_name:
+        parser.print_help()
+        sys.exit(0)
+
+    EZLog.init_handler(
+        logging.DEBUG, "/var/log/ezcloudstor/promise.log"
+    )
+    update_progress(10)
+    sm = SVManager()
+    dev = sm._select_disk_partition(options.path)
+    update_progress(20)
+    journal_dev, data_dev = sm._make_disk_partitions(dev, True)
+    update_progress(30)
+    sv = SinglePartitionVolume(options.sv_name, data_dev, journal_dev, dev.path)
+    update_progress(40)
+    sv.create()
+    update_progress(50)
+    sv_mgr = StorageVolumeManager()
+    update_progress(60)
+    sv_mgr.add_storage_volume(sv)
+    update_progress(70)
+    sv_mgr.save_config()
+    update_progress(100)
+

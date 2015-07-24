@@ -1,0 +1,199 @@
+#!/usr/bin/env python
+import os, sys, traceback
+import ezs3.account
+from ezs3.utils import *
+from ezs3.storage import *
+import logging
+from ezs3.log import EZLog
+from ezs3.crush import CrushMap
+from optparse import OptionParser
+from ezs3.ntpconfig import NTPConfig
+from ezs3.gwgroup import GatewayGroupManager
+from ezs3.cluster import ClusterManager, GW, OSD, Role
+from ezs3.defaults import BigTeraDefaultSettings as defaults
+from ezs3.config import Ezs3CephConfig, UbuntuNetworkConfig
+from ezs3.license import *
+
+def format_partitions(add_svs, fstype):
+    for sv in add_svs:
+        sv.format(fstype)
+def update_progress(progress):
+    sys.stdout.write("\r%d%%" % progress)
+    sys.stdout.flush()
+
+if __name__ == "__main__":
+#def run_create_cluster():
+    #replication = '2'
+    admin_name = "admin"
+    admin_password = "admin"
+
+    usage = "Usage: %prog [options]"
+    parser = OptionParser(usage=usage)
+    parser.add_option("-p", "--public-nic",
+                      dest="public_nic",
+                      help="Specify public interface, ex: eth0")
+    parser.add_option("-s", "--storage-nic",
+                      dest="storage_nic",
+                      help="Specify storage interface, ex: eth1")
+    parser.add_option("-n", "--name",
+                      metavar="NAME", dest="cluster_name",
+                      help="Specify name for cluster")
+    parser.add_option("-r", "--replication",
+                      dest="replication",
+                      help="Specify replication number, ex: 2")
+ 
+    (options, args) = parser.parse_args()
+    if not options.storage_nic or not options.cluster_name:
+        parser.print_help()
+        sys.exit(0)
+
+    EZLog.init_handler(
+        logging.DEBUG, "/var/log/ezcloudstor/promise.log"
+    )
+    update_progress(10)
+    conf = Ezs3CephConfig()
+    sv_mgr = StorageVolumeManager()
+
+    conf.set_cluster_name(options.cluster_name)
+    conf.set_replication(options.replication)
+    conf.set("global", "osd pool default size", options.replication)
+
+    # first node should be a ntp server
+    ntp_config = NTPConfig()       
+    ntp_config.load()
+    ntp_config.update_internal_server(ntp_config.LOCAL_HOST)
+    ntp_config.save()
+    ntp_config.restart_service()   
+    update_progress(20)
+
+    logger.info("Setup NTP done.")
+
+    create_ssh_keys()
+
+    logger.info("Create ssh key done.")
+
+    ip = get_interface_ipv4(options.storage_nic)
+    public_ip = get_interface_ipv4(options.public_nic)
+    if ip == '':
+        print "Failed to get storage interface {} IP".format(options.storage_nic)
+        sys.exit(-1)
+
+    mon_id = gen_random_string(5)
+    conf.add_mon(mon_id, ip)
+    do_cmd("rm -rf /data/mon.{0}; mkdir -p /data/mon.{0}".format(mon_id))
+
+    conf.set_storage_interface(options.storage_nic)
+    conf.set_cluster_interface(options.storage_nic)
+    conf.set_public_interface(options.public_nic)
+    conf.save()
+
+    update_progress(30)
+    svs = sv_mgr.get_storage_volumes()
+    if len(svs) > 0:
+        format_partitions(svs, 'ext4')
+
+    logger.info("Format partition done.")
+
+    for sv in svs:
+        sv.selected = True
+
+    osd_ids = []
+    weights = []
+    part_map = {}
+    osd_id = 0
+
+    update_progress(35)
+    for sv in sv_mgr.get_storage_volumes(selected_only=True):
+        
+        osd_ids.append(osd_id)
+        weights.append(
+            round(sv.get_capacity() / 1099511627776.0, 3)
+        )
+
+        sv.set_osd_id(str(osd_id))
+        sv.mount(True)
+        sv.joined_cluster = True
+        conf.add_osd(osd_id, ip, sv.get_osd_extra_options(), ip)
+        vendor = readfile(EZS3_VENDOR_FILE)
+        part_map[osd_id] = {
+            "ip": ip,
+            "partition": "",
+            "disk_info": {
+                "vendor": vendor,
+                "model": str(sv)
+            }
+        }
+        osd_id += 1
+
+    update_progress(40)
+    sv_mgr.save_config()
+    conf.add_radosgw(do_cmd("hostname").strip())
+    conf.save()
+    update_progress(45)
+    # generate crush map for each partition according to its size
+    crushmap = CrushMap.create_default()
+    crushmap.set_host_osds_in_pools(ip, osd_ids, weights, ["default"])
+    crushmap.dump("/tmp/crush.txt")
+    update_progress(50)
+
+    # create the ceph cluster with the generated crush map
+    do_cmd("crushtool -c /tmp/crush.txt -o /tmp/crush")
+    do_cmd("mkcephfs -c {} -a --crushmap /tmp/crush --pg_bits 10" \
+                     .format(conf.path))
+
+    logger.info("mkfs done.")
+    update_progress(60)
+
+    patch_ceph_init_script(ip)
+    add_updatedb_conf("PRUNEPATHS", "/data")
+    do_cmd("/etc/init.d/ceph start")
+    start_mon_service(options.cluster_name, mon_id, ip)
+    set_partition_map(part_map, 30)
+    do_cmd("rados mkpool .ezs3")
+    start_ezs3_service()
+    update_progress(65)
+    create_pool(".rgw.buckets", 1024)
+    start_web_services(get_interface_ipv4(options.public_nic)) 
+    acc_mgr = ezs3.account.get_account_manager()
+    backup_ssh_keys()
+    acc_mgr.create_admin_account('admin', 'admin')
+    logger.info("Create admin account done.")
+   
+    update_progress(70)
+    mds_id = gen_random_string(5)
+    conf.set("mds." + mds_id, "host", ip)
+    conf.save()
+    update_progress(80)
+    setup_ssh_keys()
+    mgr = GatewayGroupManager()
+    mgr.add_node(ip)
+    logger.info("prepare ezfs..")
+    #print "prepare ezfs.."
+    prepare_ezfs()
+    update_progress(90)
+    #print "finish prepare ezfs"
+    logger.info("Finish prepare ezfs.")
+    start_ezs3_service()
+    start_ezfs_smbd(smb_workgroup_name(options.cluster_name))
+    start_ezfs_nfsd()
+    start_ezfs_agent()
+    start_iscsi_services()
+    add_to_mdsmap(mds_id)
+    enabled_roles = Role()
+    enabled_roles.add(OSD)
+    enabled_roles.add(GW)
+    update_progress(100)
+
+    # save to cluster
+    cname = conf.get_cluster_name()
+    storage_if = conf.get_storage_interface()                                                                                          
+    if cname:
+        lic = get_license_content_promise() 
+        ip = get_interface_ipv4(storage_if)
+        set_license_to_cluster('license_' + ip, lic)   
+        logger.info("Setup cluster license.")
+    
+    logger.info("Create cluster done.")
+
+#if __name__ == "__main__":
+#    run_create_cluster()

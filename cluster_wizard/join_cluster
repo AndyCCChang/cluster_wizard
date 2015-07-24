@@ -1,0 +1,191 @@
+#!/usr/bin/env python
+import ezs3.account
+from ezs3.utils import *
+import os, sys, traceback
+import logging
+from ezs3.storage import *
+from ezs3.crush import CrushMap
+from optparse import OptionParser
+from ezs3.ntpconfig import NTPConfig
+from ezs3.searcher import ClusterSearcher
+from ezs3.cluster import ClusterManager, GW, OSD, Role
+from ezs3.defaults import BigTeraDefaultSettings as defaults
+from ezs3.log import EZLog
+from ezs3.gwgroup import GatewayGroupManager 
+from ezs3.config import Ezs3CephConfig, UbuntuNetworkConfig
+from ezs3.license import *
+
+def format_partitions(add_svs, fstype):
+    for sv in add_svs:
+        sv.format(fstype)
+def update_progress(progress):
+    sys.stdout.write("\r%d%%" % progress)
+    sys.stdout.flush()
+
+if __name__ == "__main__":
+    replication = '2'
+    admin_name = "admin"
+    admin_password = "admin"
+
+    usage = "Usage: %prog [options]"
+    parser = OptionParser(usage=usage)
+    parser.add_option("-p", "--public-nic",
+                      dest="public_nic",
+                      help="Specify public interface, ex: eth0")
+    parser.add_option("-s", "--storage-nic",
+                      dest="storage_nic",
+                      help="Specify storage interface, ex: eth1")
+    parser.add_option("-n", "--name",
+                      metavar="NAME", dest="cluster_name",
+                      help="Specify name for cluster")
+ 
+    (options, args) = parser.parse_args()
+    if not options.storage_nic or not options.cluster_name:
+        parser.print_help()
+        sys.exit(0)
+
+    EZLog.init_handler(
+        logging.DEBUG, "/var/log/ezcloudstor/promise.log"
+    )
+    logger = EZLog.get_logger("promise")
+    update_progress(10)
+    conf = Ezs3CephConfig()
+    sv_mgr = StorageVolumeManager()
+
+    s = ClusterSearcher()
+    clusters = s.search(options.storage_nic, 5)
+    for mon in clusters[options.cluster_name]:
+        conf.add_mon(mon.id, mon.ip)
+
+    conf.set_cluster_name(options.cluster_name)
+    update_progress(20)
+    conf.set_storage_interface(options.storage_nic)
+    conf.set_cluster_interface(options.storage_nic)
+    conf.set_public_interface(options.public_nic)
+    conf.save()
+    update_progress(30)
+    cluster_mgr = ClusterManager()
+    # sync time with mon leader before joining cluster
+    mon_lead = cluster_mgr.get_mon_leader()
+    ntp_config = NTPConfig()
+    ntp_config.load()
+    ntp_config.update_internal_server(mon_lead.ip)
+    ntp_config.save()
+    ntp_config.restart_service()
+    logger.info("Setup NTP done.")
+    setup_ssh_keys() 
+
+    update_progress(40)
+    ip = get_interface_ipv4(options.storage_nic)
+    patch_ceph_init_script(ip)
+    patch_portmap_init_config() 
+ 
+    # do not update locate db for /data
+    add_updatedb_conf("PRUNEPATHS", "/data")
+
+    # add osds
+    part_map = get_partition_map(15)
+
+    update_progress(50)
+    # add osds
+    do_cmd("ceph osd crush add-bucket default_{} host".format(ip))
+    do_cmd("ceph osd crush link default_{} pool=default".format(ip))
+
+    do_cmd("ceph mon getmap -o /tmp/monmap")
+
+    svs = sv_mgr.get_storage_volumes()
+    if len(svs) > 0:
+        format_partitions(svs, 'ext4')
+
+    update_progress(60)
+    for sv in sv_mgr.get_storage_volumes():
+        
+        logger.info("Setup SV: {}".format(sv))
+        osd_id = do_cmd("ceph osd create").strip()
+        sv.selected = True
+        sv.set_osd_id(osd_id)
+        sv.joined_cluster = True
+        sv.mount(True)
+        sv_mgr.save_config()
+        conf.add_osd(osd_id, ip, sv.get_osd_extra_options(), None)
+        conf.save()
+        cmd = "ceph-osd -i {0} --monmap /tmp/monmap --mkfs --mkjournal;" \
+                  "/etc/init.d/ceph start osd{0}".format(osd_id)
+        do_cmd(cmd)
+        do_cmd("ceph osd crush add {} 0 pool=default host=default_{}" \
+                   .format(osd_id, ip))
+        vendor = readfile(EZS3_VENDOR_FILE)
+        part_map[osd_id] = {
+                "ip": ip,
+                "partition": "",
+                "disk_info": {
+                    "vendor": vendor,
+                    "model": str(sv)
+                }
+            }
+
+    update_progress(70)
+    conf.add_radosgw(do_cmd("hostname").strip())
+    conf.save()
+
+    # add mon
+    mon_id = gen_random_string(5)
+    do_cmd('rm -rf /data/mon.{0}; mkdir -p /data/mon.{0}'.format(mon_id));
+    do_cmd('ceph auth get mon. -o /tmp/keyring')
+    do_cmd('ceph mon getmap -o /tmp/monmap')
+    do_cmd('ceph-mon -i {} --mkfs --monmap /tmp/monmap --keyring /tmp/keyring'.format(mon_id))
+    conf.add_mon(mon_id, ip)
+    conf.save()
+    logger.info("Add mon done.")
+    do_cmd("ceph mon add {0} {1}:6789".format(mon_id, ip))
+    do_cmd("/etc/init.d/ceph start mon")
+    conf.add_radosgw(do_cmd("hostname").strip())
+    conf.save()
+    start_mon_service(options.cluster_name, mon_id, ip)
+    set_partition_map(part_map, 30)
+    start_ezs3_service()
+    start_web_services(get_interface_ipv4(options.public_nic))
+    enabled_roles = Role()
+    enabled_roles.add(OSD)
+
+    update_progress(80)
+    mds_id = gen_random_string(5)  
+    conf.set("mds." + mds_id, "host", ip)
+    do_cmd("service ezs3-agent stop")
+    conf.save()
+#    print "====>"
+#    print mds_id, ip
+    update_progress(90)
+
+    logger.info("Enabling gateway...")
+    patch_ceph_init_script(ip)
+    add_updatedb_conf("PRUNEFS", "ceph")
+    patch_portmap_init_config()
+
+    setup_ssh_keys()
+    mgr = GatewayGroupManager()
+    mgr.add_node(ip)
+    prepare_ezfs() 
+    start_ezs3_service()
+    start_ctdb(ip, options.public_nic)
+    enabled_roles.add(GW)
+    start_ezfs_smbd(smb_workgroup_name(options.cluster_name))
+    start_ezfs_nfsd()
+    start_ezfs_agent()
+    start_iscsi_services()
+    add_to_mdsmap(mds_id)
+
+
+    # save to cluster
+    cname = conf.get_cluster_name()
+    storage_if = conf.get_storage_interface()                                                                                          
+    if cname:
+        lic = get_license_content_promise() 
+        ip = get_interface_ipv4(storage_if)
+        set_license_to_cluster('license_' + ip, lic)   
+        logger.info("Setup cluster license.")
+
+    logger.info("Join cluster done.")
+    
+    update_progress(100)
+

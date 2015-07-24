@@ -1,0 +1,145 @@
+#!/usr/bin/env python
+import os
+import sys
+import logging
+from ezs3.cluster import ClusterManager, GW, OSD, Role
+from ezs3.config import Ezs3CephConfig
+from optparse import OptionParser
+from ezs3.command import do_cmd
+from ezs3.utils import *
+from ezs3.storage import *
+from ezs3.log import EZLog
+
+def main(argv=None):
+    if argv is None:
+        argv = sys.argv
+
+    usage = "Usage: %prog [options]"
+    parser = OptionParser(usage=usage)
+    parser.add_option("-d", "--debug",
+                      action="store_true", dest="debug", default=False,
+                      help="Print debug message")
+
+    (options, args) = parser.parse_args()
+
+    if len(args) != 0:
+        parser.error("No arguments allowed")
+
+    if options.debug:
+        EZLog.init_handler(
+            logging.DEBUG, "/var/log/ezcloudstor/destroy-node.log"
+        )
+    else:
+        EZLog.init_handler(
+            logging.INFO, "/var/log/ezcloudstor/destroy-node.log"
+        )
+
+    logger = EZLog.get_logger("destroy-node")
+
+    if os.getuid() != 0:
+        raise RuntimeError("Please run {0} with root privilege." \
+                           .format(argv[0]))
+
+    conf = Ezs3CephConfig()
+    iface = conf.get_storage_interface()
+    if iface == "":
+        raise RuntimeError("Cannot get network interface from config file.")
+
+    logger.info("Destroying local node...")
+
+    enabled_roles = Role()
+    sv_mgr = StorageVolumeManager()
+    osd_ids = []
+    part_map = {}
+    try:
+        part_map = get_partition_map(5)
+    except:
+        pass
+
+    if GW in enabled_roles:
+        logger.debug("clean up services on gateway node")
+        do_cmd("service ezfs-agent stop; insserv -r ezfs-agent", force=True,
+               timeout=10)
+        logger.debug("ezfs-agent cleaned")
+        do_cmd("service ezfs stop; insserv -r ezfs", force=True, timeout=10)
+        logger.debug("ezfs cleaned")
+        do_cmd(
+                "service ezsnapsched stop;" \
+                "service eziscsi-rbd-cleaner stop;" \
+                "service eziscsi stop;" \
+                "service rbd_lock stop;" \
+                "service scst stop;" \
+                "insserv -r ezsnapsched eziscsi-rbd-cleaner eziscsi rbd_lock scst",
+            force=True
+        )
+       
+        logger.debug("eziscsi cleaned")
+        do_cmd("/etc/init.d/ceph stop mds", force=True)
+        logger.debug("ceph cleaned")
+
+    for sv in sv_mgr.get_storage_volumes(joined_only=True):
+        osd_id = sv.get_osd_id()
+        osd_ids.append(osd_id)
+        if part_map.has_key(osd_id):
+            del part_map[osd_id]
+    try:
+        set_partition_map(part_map, 5)
+    except:
+        pass
+
+    do_cmd("service ezgwvm stop; insserv -r ezgwvm; rm -f /var/run/ezgwvmd.pid", force=True,
+           timeout=20)
+
+    stop_mon_service()
+    do_cmd("service ezs3-webdav stop;" \
+           "service ezs3-agent stop;" \
+           "/etc/init.d/ceph stop osd;",
+           force=True)
+
+    for sv in sv_mgr.get_storage_volumes(joined_only=True):
+        osd_id = sv.get_osd_id()
+        do_cmd(
+            "ceph osd down {0}; ceph osd out {0}; ceph osd rm {0}" \
+            .format(sv.get_osd_id()),
+            timeout=30, force=True
+        )
+        sv.umount(True)
+        sv.remove_journal()
+        sv.set_osd_id(None)
+        sv.joined_cluster = False
+        sv.selected = False
+    sv_mgr.save_config()
+    do_cmd('service ganglia-monitor restart')
+
+    mons = conf.get_mon_confs()
+    myip = get_interface_ipv4(iface)
+    for m in mons:
+        if m["host"] == myip:
+            do_cmd("ceph mon remove {0}".format(m["id"]),
+                   timeout=10, force=True)
+
+    logger.debug("Kill all processes")
+    do_cmd("killall ceph-mon ceph-osd; killall -9 ceph", force=True)
+
+    logger.info("Clean up the settings...")
+
+    do_cmd("insserv -r ezs3-webdav ezs3-agent;" \
+           "a2dissite radosgw radosgw-ssl ezs3admin;" \
+           "a2ensite default;" \
+           "service apache2 restart;" \
+           "/etc/init.d/radosgw stop;" \
+           "echo > /etc/ceph/ceph.conf;" \
+           "echo > /etc/ezs3/enabled_roles",
+           force=True)
+
+    logger.info("Local node is permanently removed.")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except RuntimeError as e:
+        logger.error(str(e))
+    except KeyboardInterrupt:
+        logger.info("Operation canceled.")
