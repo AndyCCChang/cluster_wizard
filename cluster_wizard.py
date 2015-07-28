@@ -195,8 +195,13 @@ class ClusterWizard:
             dev_mapper_path = cw.get_dev_path()
             if (size_storage_file <4):#if /etc/ezs3/storage.conf no storage configuration
                 #os.system("/root/cluster_wizard/create_volume -p %s -n %s" %(dev_mapper_path , storage_vol_name))
-                os.system("./create_volume -p %s -n %s" %(dev_mapper_path , storage_vol_name))
-                print ""
+                i=0
+                for dmp in dev_mapper_path:
+                    os.system("./create_volume -p {} -n {}{}".format(dmp , storage_vol_name, i))
+                    i = i+1
+                    print ""
+                #os.system("./create_volume -p %s -n %s" %(dev_mapper_path , storage_vol_name))
+                #print ""
                 print "Creating storage volume done "
             else:
                 print "Storage volume exsisted"
@@ -259,27 +264,27 @@ class ClusterWizard:
                 #print "Creating a cluster done"
 
     def get_dev_path(self):
-        s = ""
-        for dev in parted.getAllDevices():
-            name = "{}: {}".format(os.path.basename(dev.path), dev.model)
-            size = int(dev.getSize())
-            if size > 30000000:
-                st = len(dev.path)
-                if st == 29:
-                    if not s: #get the first one if there are many
-                        s= dev.path
-                        #print s
-        return s
-        #s = []
+        #s = ""
         #for dev in parted.getAllDevices():
         #    name = "{}: {}".format(os.path.basename(dev.path), dev.model)
         #    size = int(dev.getSize())
-            #print name, size
-        #    if not "multipath" in name:
-        #        continue
-            #print dev.path
-        #    s.append(dev.path)
+        #    if size > 30000000:
+        #        st = len(dev.path)
+        #        if st == 29:
+        #            if not s: #get the first one if there are many
+        #                s= dev.path
+                        #print s
         #return s
+        s = []
+        for dev in parted.getAllDevices():
+            name = "{}: {}".format(os.path.basename(dev.path), dev.model)
+            size = int(dev.getSize())
+            #print name, size
+            if not "multipath" in name:
+                continue
+            #print dev.path
+            s.append(dev.path)
+        return s
 
     def get_dev_path_A1970(self):
         s = []
@@ -402,7 +407,7 @@ if __name__ == "__main__":
     _parser.add_argument('--version', '-v', help='Print version.', action='store_true')
     _args = _parser.parse_args()
     if _args.version:
-        print 'Cluster Wizard Version 1.1'
+        print 'Cluster Wizard Version 1.2'
         sys.exit(0)
     A1100_productname = "RS300-E8-RS4"
     A1970_productname = "1970"
@@ -473,9 +478,9 @@ if __name__ == "__main__":
             while replication !="1" and replication !="2" and replication !="3":
                 replication = raw_input("Please enter a replication number (between 1 to 3) of object data (e.g., 2):\n")
         elif create_or_join == "join" or create_or_join == "j":
-            join_cluster_name = raw_input("Please enter a cluster name (e.g., mycluster01):\n")
+            join_cluster_name = raw_input("Please enter a cluster name you want to join.(e.g., mycluster01):\n")
             while not join_cluster_name:
-                join_cluster_name = raw_input("Please enter a cluster name (e.g., mycluster01):\n")
+                join_cluster_name = raw_input("Please enter a cluster name you want to join.(e.g., mycluster01):\n")
         else:
             create_or_join = ""
 
