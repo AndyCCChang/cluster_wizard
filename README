@@ -1,0 +1,22 @@
+These scripts must be executed on VSky A series node. The directory must have:
+Note the script is still in testing stage and might lack some error handling cases.
+1. Before run the wizard, please run the following in the current directory:
+      find . -type f -exec \chmod 755 {} \;
+
+2. To run cluster wizard:
+      ./cluster_wizard.py
+3. To show the veriosn:
+      ./cluster_wizard.py -v
+
+      Note: The node must be full of drives e.g., 16 drives in VR2000, 70 drives in A1970. Otherwise, the RAID needs to be created manually at least 1 array in VR2000 and 3 arrays in A1970
+
+UPDATE:
+V1.1:
+  Add the following in cluster_wizard.py,
+    1. Timezone and timezone auto
+    2. Count PD
+    3. SetRAID in diff PD
+    4. Fix no /etc/ezs3/storage.conf bug
+    5. Highlight no accress from outside network, please contact PROMISE TECH. for pepetual license
+    6. Move is_connected after setting network
+    7. Move set_RAID ans activate trial license after configration confirm by users.

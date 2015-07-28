@@ -1,8 +1,0 @@
-These scripts must be executed on VSky A series node. The directory must have:
-Note the script is still in testing stage and might lack some error handling cases.
-1. Before run the wizard, please run the following in the current directory:
-      find . -type f -exec \chmod 755 {} \;
-
-2. To run cluster wizard:
-      ./cluster_wizard.py
-

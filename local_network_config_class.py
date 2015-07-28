@@ -50,7 +50,7 @@ class Local_network_config:
         ntp_config.restart_service()
         
     def set_network(self, pub_ip, netmask_pub_ip,gateway_pub_ip,dns_pub_ip, storage_ip, netmask_storage_ip,  productname, A1100_productname):
-        TEST198_IP = 0 # true
+        #TEST198_IP = 1 # true
         tmp_path = "/tmp/network/interfaces"
         net_path= "/etc/network/interfaces"
         interfaces_exist= os.path.isfile(tmp_path)
@@ -61,7 +61,8 @@ class Local_network_config:
             do_cmd("touch /tmp/network/interfaces")        
  #       print "productname = %s" % (productname)
 #        print pub_ip
-        if productname == A1100_productname:
+        #if productname == A1100_productname:
+        if A1100_productname in productname:
             #print productname
             file = open(tmp_path, 'w')
     	    file.write("auto lo eth7 eth6 eth5 eth4 eth0 bond0 bond1\n")

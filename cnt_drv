@@ -1,0 +1,16 @@
+===============================================================================
+PdId Model      Type     CfgCapacity Location      OpStatus   ConfigStatus     
+===============================================================================
+1    HMS5C4040B SATA HDD 3.63 TB     Encl1 Slot1   OK         Unconfigured     
+5    MC04ACA400 SATA HDD 3.63 TB     Encl1 Slot5   OK         Array0 SeqNo0    
+6    MC04ACA400 SATA HDD 3.63 TB     Encl1 Slot6   OK         Array0 SeqNo1    
+7    MC04ACA400 SATA HDD 3.63 TB     Encl1 Slot7   OK         Array0 SeqNo2    
+8    MC04ACA400 SATA HDD 3.63 TB     Encl1 Slot8   OK         Array0 SeqNo3    
+9    MC04ACA400 SATA HDD 3.63 TB     Encl1 Slot9   OK         Array0 SeqNo4    
+10   MC04ACA400 SATA HDD 3.63 TB     Encl1 Slot10  OK         Array0 SeqNo5    
+11   MC04ACA400 SATA HDD 3.63 TB     Encl1 Slot11  OK         Array0 SeqNo6    
+12   MC04ACA400 SATA HDD 3.63 TB     Encl1 Slot12  OK         Array0 SeqNo7    
+13   MC04ACA400 SATA HDD 3.63 TB     Encl1 Slot13  OK         Array0 SeqNo8    
+14   MC04ACA400 SATA HDD 3.63 TB     Encl1 Slot14  OK         Array0 SeqNo9    
+15   MC04ACA400 SATA HDD 3.63 TB     Encl1 Slot15  OK         Array0 SeqNo10   
+16   MC04ACA400 SATA HDD 3.63 TB     Encl1 Slot16  OK         Revert Global Sp 

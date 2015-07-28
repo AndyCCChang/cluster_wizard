@@ -17,7 +17,11 @@ from local_network_config_class import *
 
 if __name__ == "__main__":
     print "destroying node"
-    do_cmd("/root/cluster_wizard/destroy_node")
+    do_cmd("./destroy_node")
     print "deleting storage volume"
     do_cmd("echo \"[]\" > /etc/ezs3/storage.conf ")
+    print "deleting license file"
+    do_cmd("rm /etc/ezs3/license")
     print "destroying node"
+    print "destroying RAID"
+    do_cmd("cliib -u admin -p password -C array -a del -d 0")
