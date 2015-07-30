@@ -13,6 +13,7 @@ import socket
 class ClusterWizard:
     global A1100_productname
     global A1970_productname
+    global exe_path
     #A1100_productname = "RS300-E8-RS4"
     def is_connected(self):
         REMOTE_SERVER = "www.google.com"
@@ -27,6 +28,19 @@ class ClusterWizard:
         except:
             pass
         return False
+    def is_valid_ipv4_address(self, address):
+        try:
+            socket.inet_pton(socket.AF_INET, address)
+        except AttributeError:  # no inet_pton here, sorry
+            try:
+                socket.inet_aton(address)
+            except socket.error:
+                return False
+            return address.count('.') == 3
+        except socket.error:  # not a valid address
+            return False
+
+        return True
 
     def get_productname(self):
         productNamePath = ("/tmp/productname")
@@ -70,6 +84,32 @@ class ClusterWizard:
             do_cmd("activate_license -k CLLT3L-CSKKEY-2B1MWZ-TP2FGO-1BL8ZY-FF0U08-CIWNIA -f trial0")
         else:
             print "License existed"
+    def rescan_multipath(self):
+        sg = do_cmd("lsscsi -g |grep /dev/sg | grep Promise |awk  '{ print $8}' | cut -c6-8")
+        host = do_cmd("ls -l /sys/class/fc_host | grep host | awk '{print $9}'")
+        #print s
+        sg_l = []
+        host_l = []
+        host_l.append(host.splitlines()[0])
+        host_l.append(host.splitlines()[1])
+        sg_l.append(sg.splitlines()[0])
+        sg_l.append(sg.splitlines()[1])
+        #i2 = s.splitlines()[1]
+       # print "multipath -F"
+       # do_cmd("multipath -F")
+        #print "echo \"1\" > /sys/class/scsi_generic/sgx/device/delete"
+        for l in sg_l:
+            do_cmd("echo \"1\" > /sys/class/scsi_generic/{}/device/delete".format(l))
+    #        print l
+        #print "echo \"- - -\" > /sys/class/scsi_host/hostx/scan"
+        for k in host_l:
+           do_cmd("echo \"- - -\" > /sys/class/scsi_host/{}/scan".format(k))
+    #         print k
+        #print "i = {}".format(i)
+        #print "i2 = {}".format(i2)
+    #    path = get_dev_path()
+    #    for i in path:
+    #        print path
 
     def set_RAID(self, productname):	    
         #phdrv_count_A1100 = self.count_phydrv_A1100()
@@ -88,12 +128,14 @@ class ClusterWizard:
                     print("RAID existed")
                 else:
                     do_cmd("cliib -u admin -p password -C array -a add -p1~15 -l\\\"raid=5\\\"")
+                    self.rescan_multipath()
             elif phdrv_count_A1100 ==32:
                 if is_OK_1_array == "OK\n":#need to grep and check 2 OK in the future 
                     print("RAID existed")
                 else:
                     do_cmd("cliib -u admin -p password -C array -a add -p1~15 -l\\\"raid=5\\\"")                
                     do_cmd("cliib -u admin -p password -C array -a add -p17~31 -l\\\"raid=5\\\"")
+                    self.rescan_multipath()
             elif  phdrv_count_A1100 ==48:
                 if is_OK_1_array == "OK\n":#need to grep and check 3 OK in the future 
                     print("RAID existed")
@@ -101,6 +143,7 @@ class ClusterWizard:
                     do_cmd("cliib -u admin -p password -C array -a add -p1~15 -l\\\"raid=5\\\"")                
                     do_cmd("cliib -u admin -p password -C array -a add -p17~31 -l\\\"raid=5\\\"")
                     do_cmd("cliib -u admin -p password -C array -a add -p33~47 -l\\\"raid=5\\\"")
+                    self.rescan_multipath()
             elif  phdrv_count_A1100 ==64:
                 if is_OK_1_array == "OK\n":#need to grep and check 4 OK in the future 
                     print("RAID existed")
@@ -109,11 +152,13 @@ class ClusterWizard:
                     do_cmd("cliib -u admin -p password -C array -a add -p17~31 -l\\\"raid=5\\\"")
                     do_cmd("cliib -u admin -p password -C array -a add -p33~47 -l\\\"raid=5\\\"")
                     do_cmd("cliib -u admin -p password -C array -a add -p49~63 -l\\\"raid=5\\\"")
-            #elif  phdrv_count_A1100 ==13: #test version
-            #    if is_OK_1_array == "OK\n":#need to grep and check 4 OK in the future 
-            #        print("RAID existed")
-            #    else:
-            #        do_cmd("cliib -u admin -p password -C array -a add -p5~15 -l\\\"raid=5\\\"")                
+                    self.rescan_multipath()
+            elif  phdrv_count_A1100 ==13: #test version
+                if is_OK_1_array == "OK\n":#need to grep and check 4 OK in the future 
+                    print("RAID existed")
+                else:
+                    do_cmd("cliib -u admin -p password -C array -a add -p5~15 -l\\\"raid=5\\\"")                
+                    self.rescan_multipath()
             else:
                 print("Physical drives are not enough")
                 sys.exit(0)
@@ -145,25 +190,45 @@ class ClusterWizard:
                     do_cmd("cliib -u admin -p password -C spare -a add -p 32 -t g -r y")
                     do_cmd("cliib -u admin -p password -C spare -a add -p 48 -t g -r y")
                     do_cmd("cliib -u admin -p password -C spare -a add -p 64 -t g -r y")
-            #elif phdrv_count_A1100 ==13:#test version
-            #    print ("pd = 13")
-            #    if is_OK_1_spare == "OK\n":#need to grep and check 4 OK in the future
-            #        print("Hot spare drive existed")
-            #    else:
-            #        do_cmd("cliib -u admin -p password -C spare -a add -p 16 -t g -r y")
+            elif phdrv_count_A1100 ==13:#test version
+                print ("pd = 13")
+                if is_OK_1_spare == "OK\n":#need to grep and check 4 OK in the future
+                    print("Hot spare drive existed")
+                else:
+                    do_cmd("cliib -u admin -p password -C spare -a add -p 16 -t g -r y")
             else:
                 print("Physical drives are not enough")
                 sys.exit(0)
                 
         else:#A1970
-            is_VD = do_cmd("./check_mcli_array.sh")
+            is_VD = do_cmd("{}/check_mcli_array.sh".format(exe_path))
             if is_VD == "VD\nVD\nVD\n":
                 print("RAID existed")
             else:
-                do_cmd("./run_mcli.sh")
+                do_cmd("{}/run_mcli.sh".format(exe_path))
         print "Setting RAID done"
         logger.info("Setting RAID done")
-    # NO CALLED
+    # count number of dev mapper
+    def count_dev_mapper(self):
+        #print "count_dev_mapper"
+        dev_path = self.get_dev_path()
+        l_dev_path = len(dev_path)
+        logger.info("count_dev_mapper: {}".format(l_dev_path))
+        return l_dev_path
+    def check_dev_mapper_A1100(self):
+        if self.count_dev_mapper() == 1 and self.count_phydrv_A1100()==16:
+            return 1
+        elif self.count_dev_mapper() == 2 and self.count_phydrv_A1100()==32:
+            return 1
+        elif self.count_dev_mapper() == 3 and self.count_phydrv_A1100()==48:
+            return 1
+        elif self.count_dev_mapper() == 4 and self.count_phydrv_A1100()==64:
+            return 1
+        elif self.count_dev_mapper() == 1 and self.count_phydrv_A1100()==13:#andy test version
+            return 1
+        else:
+            return 0
+
     def check_RAID(self, productname):
 #        if productname == A1100_productname:
         if A1100_productname in productname:
@@ -174,7 +239,7 @@ class ClusterWizard:
             else:
                 return 0
         else:#A1970
-            is_VD = do_cmd("./check_mcli_array.sh")
+            is_VD = do_cmd("{}/check_mcli_array.sh".format(exe_path))
             if is_VD == "VD\nVD\nVD\n":
                 return 1
             else:
@@ -195,14 +260,20 @@ class ClusterWizard:
             dev_mapper_path = cw.get_dev_path()
             if (size_storage_file <4):#if /etc/ezs3/storage.conf no storage configuration
                 #os.system("/root/cluster_wizard/create_volume -p %s -n %s" %(dev_mapper_path , storage_vol_name))
-                i=0
-                for dmp in dev_mapper_path:
-                    os.system("./create_volume -p {} -n {}{}".format(dmp , storage_vol_name, i))
-                    i = i+1
-                    print ""
-                #os.system("./create_volume -p %s -n %s" %(dev_mapper_path , storage_vol_name))
-                #print ""
-                print "Creating storage volume done "
+                if self.check_dev_mapper_A1100():
+                    i=0
+                    for dmp in dev_mapper_path:
+                        os.system("{}/create_volume -p {} -n {}-{}".format(exe_path, dmp , storage_vol_name, i))
+                        i = i+1
+                        print ""
+                    #os.system("./create_volume -p %s -n %s" %(dev_mapper_path , storage_vol_name))
+                    #print ""
+                    print "Creating storage volume done "
+                else:
+                    #print "Number of device mapper: {}".format(self.count_dev_mapper())
+                    #print "Number of drive: {}".format(self.count_phydrv_A1100())
+                    print "Number of device mapper is incorrect, please check it or reboot."
+                    sys.exit(0)
             else:
                 print "Storage volume exsisted"
         else:#A1970
@@ -211,7 +282,7 @@ class ClusterWizard:
                 i=0
                 for dmpA in dev_mapper_path_A1970:
                     #do_cmd("/root/cluster_wizard/create_volume -p {} -n {}{}".format(dmpA , storage_vol_name, i))
-                    os.system("./create_volume -p {} -n {}{}".format(dmpA , storage_vol_name, i))
+                    os.system("{}/create_volume -p {} -n {}-{}".format(exe_path, dmpA , storage_vol_name, i))
                     i = i+1
                     print ""
                 print "Creating storage volume done "
@@ -236,10 +307,10 @@ class ClusterWizard:
             print "Please wait..."
             #if productname == A1100_productname:
             if A1100_productname in productname:
-                os.system("./create_cluster -p bond0 -s bond1 -n {} -r {}".format(cluster_name, replication))
+                os.system("{}/create_cluster -p bond0 -s bond1 -n {} -r {}".format(exe_path, cluster_name, replication))
                 print ""
             else: #A1970
-		os.system("./create_cluster -p bond0 -s bond1 -n {} -r {}".format(cluster_name, replication))
+		os.system("{}/create_cluster -p bond0 -s bond1 -n {} -r {}".format(exe_path, cluster_name, replication))
                 print ""
                 #print "Creating a cluster done"
 
@@ -255,10 +326,10 @@ class ClusterWizard:
             #if productname == A1100_productname:
             if A1100_productname in productname:
                 #do_cmd("/root/cluster_wizard/join_cluster -p bond0 -s bond1 -n {}").format(join_cluster_name)
-                os.system("./join_cluster -p bond0 -s bond1 -n {}".format(join_cluster_name))
+                os.system("{}/join_cluster -p bond0 -s bond1 -n {}".format(exe_path, join_cluster_name))
                 print "joining a cluster {} done".format(join_cluster_name)
             else: #A1970
-                os.system("./join_cluster -p bond0 -s bond1 -n {}".format(join_cluster_name))
+                os.system("{}/join_cluster -p bond0 -s bond1 -n {}".format(exe_path, join_cluster_name))
                 print "joining a cluster {} done".format(join_cluster_name)
                 print ""
                 #print "Creating a cluster done"
@@ -388,15 +459,16 @@ class ClusterWizard:
     def count_phydrv_A1100(self):
         phydrv = do_cmd("cliib -u admin -p password -C phydrv")
         #print phydrv
-        file_ = open('cnt_drv', 'w')
+        file_ = open('/tmp/cnt_drv', 'w')
         file_.write("{}".format(phydrv))
         line_count = 0
         file_.close()
-        with open('cnt_drv') as infp:
+        with open('/tmp/cnt_drv') as infp:
             for line in infp:
                if line.strip():
                   line_count += 1
         line_count = line_count-3
+        logger.info("count_phydrv_A1100: {}".format(line_count))
         return line_count
 
 
@@ -407,11 +479,12 @@ if __name__ == "__main__":
     _parser.add_argument('--version', '-v', help='Print version.', action='store_true')
     _args = _parser.parse_args()
     if _args.version:
-        print 'Cluster Wizard Version 1.2'
+        print 'Cluster Wizard Version 1.3'
         sys.exit(0)
     A1100_productname = "RS300-E8-RS4"
     A1970_productname = "1970"
     A1970_productname2 = "H3970"
+    exe_path = "/promise/bin"
     #print A1100_productname
     cw = ClusterWizard()
     is_clus_existed = cw.check_cluster_existed()
@@ -441,29 +514,58 @@ if __name__ == "__main__":
     if not new_hostname:
         new_hostname = hostname
     lnc.print_pub_ip_description()
+    # Input pub IP
     if not current_pub_ip:
         pub_ip = raw_input("Please enter a public IP (e.g., 10.0.0.10):")
+        while not cw.is_valid_ipv4_address(pub_ip):
+            pub_ip = raw_input("Please enter a valid public IP (e.g., 10.0.0.10):")
     else:
         pub_ip = raw_input("Please enter a new public IP (e.g., 10.0.0.10) or accept the current public ip: {} with Enter:\n".format(current_pub_ip))
-        if not pub_ip:
-            pub_ip = c_pub_ip
-    while not pub_ip:
-        pub_ip = raw_input("Please enter a public IP (e.g., 10.0.0.10):")
+        while not cw.is_valid_ipv4_address(pub_ip) and pub_ip !="":
+            pub_ip = raw_input("Please enter a valid new public IP (e.g., 10.0.0.10) or accept the current public ip: {} with Enter:\n".format(current_pub_ip))
+        if pub_ip =="":
+            pub_ip = current_pub_ip
+
+    ###########################################################################################################################################
+    # Input netmask of the public network
     netmask_pub_ip = raw_input("Please enter a new netmask of the public network or accept the default: 255.255.255.0 with Enter:\n")
+    while not cw.is_valid_ipv4_address(netmask_pub_ip) and netmask_pub_ip != "":
+        netmask_pub_ip = raw_input("Please enter a valid netmask of the public network or accept the default: 255.255.255.0 with Enter:\n")
+    if not netmask_pub_ip:
+        netmask_pub_ip = "255.255.255.0"
+    ###########################################################################################################################################
+    # Input gateway ip of the public network    
     gateway_pub_ip = raw_input("Please enter a gateway ip of the public network or leave blank with Enter:\n")
+    while not cw.is_valid_ipv4_address(gateway_pub_ip) and gateway_pub_ip != "":
+        gateway_pub_ip = raw_input("Please enter a valid gateway ip of the public network or leave blank with Enter:\n")
+    # Input dns ip of the public network
     dns_pub_ip = raw_input("Please enter a dns ip of the public network or leave blank with Enter:\n")
+    while not cw.is_valid_ipv4_address(dns_pub_ip) and dns_pub_ip != "":
+        dns_pub_ip = raw_input("Please enter a valid dns ip of the public network or leave blank with Enter:\n")
+    # Input storage IP
     lnc.print_storage_ip_description()
     if not current_storage_ip:
         storage_ip = raw_input("Please enter a storage IP (e.g., 10.10.10.10):\n")
+        while not cw.is_valid_ipv4_address(storage_ip):
+            storage_ip = raw_input("Please enter a valid storage IP (e.g., 10.10.10.10):\n")
     else:
-        storage_ip = raw_input("Please enter a storage IP (e.g., 10.10.10.10) or accept the current storage IP: {} with Enter:\n".format(current_storage_ip))
+        storage_ip = raw_input("Please enter a new storage IP (e.g., 10.10.10.10) or accept the current storage IP: {} with Enter:\n".format(current_storage_ip))
+        while not cw.is_valid_ipv4_address(storage_ip) and storage_ip !="":
+            storage_ip = raw_input("Please enter a valid new storage IP (e.g., 10.10.10.10) or accept the current storage IP: {} with Enter:\n".format(current_storage_ip))
         if not storage_ip:
             storage_ip = c_storage_ip
-    while not storage_ip:
-        storage_ip = raw_input("Please enter a storage IP (e.g., 10.10.10.10):\n")
+    # Input netmask of the storage network
     netmask_storage_ip = raw_input("Please enter a new netmask of the storage network or accept the default: 255.255.255.0 with Enter:\n")
+    while not cw.is_valid_ipv4_address(netmask_storage_ip) and netmask_storage_ip != "":
+        netmask_storage_ip = raw_input("Please enter a valid netmask of the storage network or accept the default: 255.255.255.0 with Enter:\n")
+    if not netmask_storage_ip:
+        netmask_storage_ip = "255.255.255.0"
+    # Input ntp server address
     lnc.print_ntp_description()
     ntp_server = raw_input("Please enter an ntp server address or leave blank with Enter:\n")
+    while not cw.is_valid_ipv4_address(ntp_server) and ntp_server !="":
+        ntp_server = raw_input("Please enter an ntp server address or leave blank with Enter:\n")
+    # Input Storage volume
     storage_vol_name = raw_input("Please enter a storage volume name (e.g., storage01):\n")
     while not storage_vol_name:
         storage_vol_name = raw_input("Please enter a storage volume name (e.g., storage01):\n")
@@ -495,8 +597,12 @@ if __name__ == "__main__":
     run_wizard = "no" #default not run
     if create_or_join == "create" or create_or_join == "c":
         run_wizard = raw_input("Would you like to {} a cluster {}? (yes/no or exit the wizard with Enter):\n".format(create_or_join, cluster_name))
+        while run_wizard != "no" and run_wizard !="" and run_wizard != "yes":
+            run_wizard = raw_input("Would you like to {} a cluster {}? (yes/no or exit the wizard with Enter):\n".format(create_or_join, cluster_name))
     else:
         run_wizard = raw_input("Would you like to {} a cluster {}? (yes/no or exit the wizard with Enter):\n".format(create_or_join, join_cluster_name))
+        while run_wizard != "no" and run_wizard !="" and run_wizard != "yes":
+            run_wizard = raw_input("Would you like to {} a cluster {}? (yes/no or exit the wizard with Enter):\n".format(create_or_join, join_cluster_name))
     if not run_wizard:
         run_wizard = "no"
     if run_wizard == "no" or run_wizard == "n":
