@@ -1,4 +1,9 @@
 #!/usr/bin/env python
+#####################
+#Version 1.6        #
+#Add ganglia restart#
+#####################
+
 import os, sys, traceback
 import ezs3.account
 from ezs3.utils import *
@@ -14,6 +19,8 @@ from ezs3.defaults import BigTeraDefaultSettings as defaults
 from ezs3.config import Ezs3CephConfig, UbuntuNetworkConfig
 from ezs3.license import *
 
+#PROMCID="/promise/bin/promcid"
+PROMCID="/run/chassisid"
 def format_partitions(add_svs, fstype):
     for sv in add_svs:
         sv.format(fstype)
@@ -22,8 +29,6 @@ def update_progress(progress):
     sys.stdout.flush()
 
 if __name__ == "__main__":
-#def run_create_cluster():
-    #replication = '2'
     admin_name = "admin"
     admin_password = "admin"
 
@@ -41,9 +46,19 @@ if __name__ == "__main__":
     parser.add_option("-r", "--replication",
                       dest="replication",
                       help="Specify replication number, ex: 2")
- 
+    parser.add_option("-c", "--chassis",
+                      action='store_true',
+                      help="Enable chassis-aware or not")
+    parser.add_option("-v", "--verion",
+                      dest='version',
+                      action='store_true',
+                      help="Print version")
+
     (options, args) = parser.parse_args()
-    if not options.storage_nic or not options.cluster_name:
+    if options.version:
+        print "Create cluster version 1.6"
+        sys.exit(0)
+    if not options.storage_nic or not options.cluster_name or not options.replication:
         parser.print_help()
         sys.exit(0)
 
@@ -59,11 +74,11 @@ if __name__ == "__main__":
     conf.set("global", "osd pool default size", options.replication)
 
     # first node should be a ntp server
-    ntp_config = NTPConfig()       
+    ntp_config = NTPConfig()
     ntp_config.load()
     ntp_config.update_internal_server(ntp_config.LOCAL_HOST)
     ntp_config.save()
-    ntp_config.restart_service()   
+    ntp_config.restart_service()
     update_progress(20)
 
     logger.info("Setup NTP done.")
@@ -104,7 +119,7 @@ if __name__ == "__main__":
 
     update_progress(35)
     for sv in sv_mgr.get_storage_volumes(selected_only=True):
-        
+
         osd_ids.append(osd_id)
         weights.append(
             round(sv.get_capacity() / 1099511627776.0, 3)
@@ -131,8 +146,15 @@ if __name__ == "__main__":
     conf.save()
     update_progress(45)
     # generate crush map for each partition according to its size
-    crushmap = CrushMap.create_default()
-    crushmap.set_host_osds_in_pools(ip, osd_ids, weights, ["default"])
+    chassis_id = ""
+    if options.chassis:
+        chassis_id = do_cmd("cat {}".format(PROMCID)).strip()
+        crushmap = CrushMap.create_default(chassis_id, "chassis")
+        crushmap.set_host_osds_in_chassis(ip, osd_ids, weights, chassis_id)
+        crushmap.set_chassis_in_pools(chassis_id, "default")
+    else:
+        crushmap = CrushMap.create_default()
+        crushmap.set_host_osds_in_pools(ip, osd_ids, weights, ["default"])
     crushmap.dump("/tmp/crush.txt")
     update_progress(50)
 
@@ -154,6 +176,7 @@ if __name__ == "__main__":
     update_progress(65)
     create_pool(".rgw.buckets", 1024)
     start_web_services(get_interface_ipv4(options.public_nic)) 
+    start_webdav()
     acc_mgr = ezs3.account.get_account_manager()
     backup_ssh_keys()
     acc_mgr.create_admin_account('admin', 'admin')
@@ -174,6 +197,7 @@ if __name__ == "__main__":
     #print "finish prepare ezfs"
     logger.info("Finish prepare ezfs.")
     start_ezs3_service()
+    start_ctdb(ip, options.public_nic)
     start_ezfs_smbd(smb_workgroup_name(options.cluster_name))
     start_ezfs_nfsd()
     start_ezfs_agent()
@@ -182,18 +206,23 @@ if __name__ == "__main__":
     enabled_roles = Role()
     enabled_roles.add(OSD)
     enabled_roles.add(GW)
-    update_progress(100)
+    do_cmd('service ganglia-monitor restart')
+    update_progress(95)
 
     # save to cluster
     cname = conf.get_cluster_name()
-    storage_if = conf.get_storage_interface()                                                                                          
+    storage_if = conf.get_storage_interface()
     if cname:
-        lic = get_license_content_promise() 
+        lic = get_license_content_promise()
         ip = get_interface_ipv4(storage_if)
-        set_license_to_cluster('license_' + ip, lic)   
+        set_license_to_cluster('license_' + ip, lic)
+        if options.chassis:
+            set_chassis_setting("yes")
+            set_chassis_by_ip(chassis_id, ip)
+        else:
+            set_chassis_setting("no")
         logger.info("Setup cluster license.")
-    
+
+    update_progress(100)
     logger.info("Create cluster done.")
 
-#if __name__ == "__main__":
-#    run_create_cluster()

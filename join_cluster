@@ -1,4 +1,9 @@
 #!/usr/bin/env python
+#####################
+#Version 1.7        #
+#Add ganglia restart#
+#####################
+
 import ezs3.account
 from ezs3.utils import *
 import os, sys, traceback
@@ -11,10 +16,11 @@ from ezs3.searcher import ClusterSearcher
 from ezs3.cluster import ClusterManager, GW, OSD, Role
 from ezs3.defaults import BigTeraDefaultSettings as defaults
 from ezs3.log import EZLog
-from ezs3.gwgroup import GatewayGroupManager 
+from ezs3.gwgroup import GatewayGroupManager
 from ezs3.config import Ezs3CephConfig, UbuntuNetworkConfig
 from ezs3.license import *
 
+PROMCID="cat /run/chassisid"
 def format_partitions(add_svs, fstype):
     for sv in add_svs:
         sv.format(fstype)
@@ -38,8 +44,16 @@ if __name__ == "__main__":
     parser.add_option("-n", "--name",
                       metavar="NAME", dest="cluster_name",
                       help="Specify name for cluster")
- 
+    parser.add_option("-v", "--verion",
+                      dest='version',
+                      action='store_true',
+                      help="Print version")
+
     (options, args) = parser.parse_args()
+    if options.version:
+        print "Join cluster version 1.7"
+        sys.exit(0)
+
     if not options.storage_nic or not options.cluster_name:
         parser.print_help()
         sys.exit(0)
@@ -73,13 +87,13 @@ if __name__ == "__main__":
     ntp_config.save()
     ntp_config.restart_service()
     logger.info("Setup NTP done.")
-    setup_ssh_keys() 
+    setup_ssh_keys()
 
     update_progress(40)
     ip = get_interface_ipv4(options.storage_nic)
     patch_ceph_init_script(ip)
-    patch_portmap_init_config() 
- 
+    patch_portmap_init_config()
+
     # do not update locate db for /data
     add_updatedb_conf("PRUNEPATHS", "/data")
 
@@ -88,8 +102,17 @@ if __name__ == "__main__":
 
     update_progress(50)
     # add osds
-    do_cmd("ceph osd crush add-bucket default_{} host".format(ip))
-    do_cmd("ceph osd crush link default_{} pool=default".format(ip))
+    use_chassis_replica = get_chassis_setting()
+    if use_chassis_replica != "yes":
+        do_cmd("ceph osd crush add-bucket default_{} host".format(ip))
+        do_cmd("ceph osd crush link default_{} pool=default".format(ip))
+    else:
+        chassis_id = do_cmd(PROMCID).strip()
+        do_cmd("ceph osd crush add-bucket {} chassis".format(chassis_id), force=True)
+        do_cmd("ceph osd crush add-bucket {}_{} host".format(chassis_id, ip), force=True)
+        do_cmd("ceph osd crush link {}_{} chassis={}".format(chassis_id, ip, chassis_id), force=True)
+        do_cmd("ceph osd crush link {} pool=default".format(chassis_id), force=True)
+        set_chassis_by_ip(chassis_id, ip)
 
     do_cmd("ceph mon getmap -o /tmp/monmap")
 
@@ -99,7 +122,7 @@ if __name__ == "__main__":
 
     update_progress(60)
     for sv in sv_mgr.get_storage_volumes():
-        
+
         logger.info("Setup SV: {}".format(sv))
         osd_id = do_cmd("ceph osd create").strip()
         sv.selected = True
@@ -112,8 +135,14 @@ if __name__ == "__main__":
         cmd = "ceph-osd -i {0} --monmap /tmp/monmap --mkfs --mkjournal;" \
                   "/etc/init.d/ceph start osd{0}".format(osd_id)
         do_cmd(cmd)
-        do_cmd("ceph osd crush add {} 0 pool=default host=default_{}" \
+        if use_chassis_replica != "yes":
+            do_cmd("ceph osd crush add {} 0 pool=default host=default_{}" \
                    .format(osd_id, ip))
+        else:
+            chassis_id = do_cmd(PROMCID).strip()
+            do_cmd("ceph osd crush add {} 0 chassis={} host={}_{}" \
+                   .format(osd_id, chassis_id, chassis_id, ip))
+
         vendor = readfile(EZS3_VENDOR_FILE)
         part_map[osd_id] = {
                 "ip": ip,
@@ -145,6 +174,7 @@ if __name__ == "__main__":
     set_partition_map(part_map, 30)
     start_ezs3_service()
     start_web_services(get_interface_ipv4(options.public_nic))
+    start_webdav()
     enabled_roles = Role()
     enabled_roles.add(OSD)
 
@@ -153,8 +183,6 @@ if __name__ == "__main__":
     conf.set("mds." + mds_id, "host", ip)
     do_cmd("service ezs3-agent stop")
     conf.save()
-#    print "====>"
-#    print mds_id, ip
     update_progress(90)
 
     logger.info("Enabling gateway...")
@@ -165,7 +193,7 @@ if __name__ == "__main__":
     setup_ssh_keys()
     mgr = GatewayGroupManager()
     mgr.add_node(ip)
-    prepare_ezfs() 
+    prepare_ezfs()
     start_ezs3_service()
     start_ctdb(ip, options.public_nic)
     enabled_roles.add(GW)
@@ -174,18 +202,18 @@ if __name__ == "__main__":
     start_ezfs_agent()
     start_iscsi_services()
     add_to_mdsmap(mds_id)
-
+    do_cmd("service ganglia-monitor restart")
 
     # save to cluster
     cname = conf.get_cluster_name()
     storage_if = conf.get_storage_interface()                                                                                          
     if cname:
-        lic = get_license_content_promise() 
+        lic = get_license_content_promise()
         ip = get_interface_ipv4(storage_if)
-        set_license_to_cluster('license_' + ip, lic)   
+        set_license_to_cluster('license_' + ip, lic)
         logger.info("Setup cluster license.")
 
     logger.info("Join cluster done.")
-    
+
     update_progress(100)
 

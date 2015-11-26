@@ -1,4 +1,8 @@
 #!/usr/bin/env python
+#####################
+#Version 1.2        #
+#####################
+
 import os, sys, parted, traceback
 from ezs3.storage import *
 from optparse import OptionParser
@@ -81,8 +85,16 @@ if __name__ == "__main__":
     parser.add_option("-n", "--name",
                       metavar="NAME", dest="sv_name",
                       help="Specify name for storage volume")
- 
+    parser.add_option("-v", "--verion",
+                      dest='version',
+                      action='store_true',
+                      help="Print version")
+
     (options, args) = parser.parse_args()
+    if options.version:
+        print "Create volume version 1.2"
+        sys.exit(0)
+ 
     if not options.path or not options.sv_name:
         parser.print_help()
         sys.exit(0)

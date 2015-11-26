@@ -1,0 +1,1421 @@
+#!/usr/bin/env python
+#####################
+#Version 1.8.16     #
+#####################
+#choose_nic for quorum
+import os, sys, parted, argparse
+import textwrap
+import json
+import StringIO
+from ezs3.defaults import BigTeraDefaultSettings as defaults
+import logging
+from ezs3.log import EZLog
+from ezs3.command import do_cmd
+from ezs3.log import EZLog
+from ezs3.utils import * #define logger
+from local_network_config_class import *
+import socket
+from ezs3.searcher import ClusterSearcher
+import subprocess
+import commands
+from ezs3.storage import StorageVolumeManager
+agree_path = "/etc/ezs3/eula_agree"
+trial_eula = "/var/www/trial_eula.txt"
+perpetual_eula = "/var/www/perpetual_eula.txt"
+eula = "/var/www/eula.txt"
+class ClusterWizard:
+    global A1100_productname
+    global A1970_productname
+    global exe_path
+    global crmlicfilePath
+    #A1100_productname = "RS300-E8-RS4"
+    def is_connected(self):
+        REMOTE_SERVER = "www.google.com"
+        try:
+    # see if we can resolve the host name -- tells us if there is
+    # a DNS listening
+            host = socket.gethostbyname(REMOTE_SERVER)
+    # connect to the host -- tells us if the host is actually
+    # reachable
+            s = socket.create_connection((host, 80), 2)
+            return True
+        except:
+            pass
+        return False
+    def is_valid_ipv4_address(self, address):
+        try:
+            socket.inet_pton(socket.AF_INET, address)
+        except AttributeError:  # no inet_pton here, sorry
+            try:
+                socket.inet_aton(address)
+            except socket.error:
+                return False
+            return address.count('.') == 3
+        except socket.error:  # not a valid address
+            return False
+
+        return True
+    def is_valid_hostname(self, hostname):
+        """ str -> bool
+        Found this on from http://stackoverflow.com/questions/2532053/validate-a-hostname-string
+        First it checks to see if the hostname is too long. Next, it checks to see if the first character is a number.
+        If the last character is a ".", it is removed. A list of acceptable characters is then compiled and each section
+        of the host name, split by any ".", is checked for valid characters. If there everything is valid, True is returned.
+        :param hostname:
+        :return:
+        """
+        if len(hostname) > 255:
+            return False
+        if not hostname:
+            return False
+        if hostname[0].isdigit(): return False
+        if hostname[-1:] == ".":
+            hostname = hostname[:-1] # strip exactly one dot from the right, if present
+        allowed = re.compile("(?!-)[A-Z\d-]{1,63}(?<!-)$", re.IGNORECASE)
+        return all(allowed.match(x) for x in hostname.split("."))
+    # Input hostname
+    def input_hostname(self, hostname):
+        new_hostname = raw_input("Please enter a new hostname (e.g., hostname01) or accept the current hostname: {} and press Enter: ".format(hostname))
+        while not self.is_valid_hostname(new_hostname) and new_hostname != "":
+            new_hostname = raw_input("Please enter a valid new hostname (e.g., hostname01) or accept the current hostname: {} and press Enter: ".format(hostname))
+        if not new_hostname:
+            new_hostname = hostname
+        return new_hostname
+    # Input pub IP
+    def input_pub_ip(self, current_pub_ip, lnc):
+        lnc.print_pub_ip_description()
+        if not current_pub_ip:
+            pub_ip = raw_input("Please enter a public IP (e.g., 10.0.0.10): ")
+            while not self.is_valid_ipv4_address(pub_ip):
+                pub_ip = raw_input("Please enter a valid public IP (e.g., 10.0.0.10): ")
+        else:
+            pub_ip = raw_input("Please enter a new public IP (e.g., 10.0.0.10) or accept the current public ip: {} and press Enter: ".format(current_pub_ip))
+            while not self.is_valid_ipv4_address(pub_ip) and pub_ip !="":
+                pub_ip = raw_input("Please enter a valid new public IP (e.g., 10.0.0.10) or accept the current public ip: {} and press Enter: ".format(current_pub_ip))
+            if pub_ip =="":
+                pub_ip = current_pub_ip
+        return pub_ip
+    # Input netmask of the public network
+    def input_netmask_pub(self, netmask_pub_ip):
+        netmask_pub_ip = raw_input("Please enter a new netmask of the public network or accept the default: 255.255.255.0 and press Enter: ")
+        while not self.is_valid_ipv4_address(netmask_pub_ip) and netmask_pub_ip != "":
+            netmask_pub_ip = raw_input("Please enter a valid netmask of the public network or accept the default: 255.255.255.0 and press Enter: ")
+        if not netmask_pub_ip:
+            netmask_pub_ip = "255.255.255.0"
+        return netmask_pub_ip
+    # Input gateway ip of the public network
+    def input_gateway_pub(self):
+        gateway_pub_ip = raw_input("Please enter a gateway ip of the public network or leave blank and press Enter: ")
+        while not self.is_valid_ipv4_address(gateway_pub_ip) and gateway_pub_ip != "":
+            gateway_pub_ip = raw_input("Please enter a valid gateway ip of the public network or leave blank and press Enter: ")
+        return gateway_pub_ip
+    # Input dns ip of the public network
+    def input_dns_pub(self):
+        dns_pub_ip = raw_input("Please enter a dns ip of the public network or leave blank and press Enter: ")
+        while not self.is_valid_ipv4_address(dns_pub_ip) and dns_pub_ip != "":
+            dns_pub_ip = raw_input("Please enter a valid dns ip of the public network or leave blank and press Enter: ")
+        return dns_pub_ip
+    # Input storage IP
+    def input_storage_ip(self, current_storage_ip, lnc):
+        lnc.print_storage_ip_description()
+        if not current_storage_ip:
+            storage_ip = raw_input("Please enter a cluster (private) IP (e.g., 10.10.10.10): ")
+            while not self.is_valid_ipv4_address(storage_ip):
+                storage_ip = raw_input("Please enter a valid cluster (private) IP (e.g., 10.10.10.10): ")
+        else:
+            storage_ip = raw_input("Please enter a new cluster (private) IP (e.g., 10.10.10.10) or accept the current IP: {} and press Enter: ".format(current_storage_ip))
+            while not self.is_valid_ipv4_address(storage_ip) and storage_ip !="":
+                storage_ip = raw_input("Please enter a valid new cluster (private) IP (e.g., 10.10.10.10) or accept the storage IP: {} and press Enter: ".format(current_storage_ip))
+            if not storage_ip:
+                storage_ip = current_storage_ip
+        return storage_ip
+    # Input netmask of the storage network
+    def input_netmask_storage(self, netmask_storage_ip):
+        netmask_storage_ip = raw_input("Please enter a new netmask of the cluster (private) network or accept the default: 255.255.255.0 and press Enter: ")
+        while not self.is_valid_ipv4_address(netmask_storage_ip) and netmask_storage_ip != "":
+            netmask_storage_ip = raw_input("Please enter a valid netmask of the cluster (private) network or accept the default: 255.255.255.0 and press Enter: ")
+        if not netmask_storage_ip:
+            netmask_storage_ip = "255.255.255.0"
+    # Input ntp server address
+    def input_ntp_address(self, lnc):
+        lnc.print_ntp_description()
+        ntp_server = raw_input("Please enter an ntp server address or leave blank and press Enter: ")
+        while not self.is_valid_ipv4_address(ntp_server) and ntp_server !="":
+            ntp_server = raw_input("Please enter an ntp server address or leave blank and press Enter: ")
+        return ntp_server
+    # Input Storage volume
+    def input_storage_volume(self):
+        storage_vol_name = raw_input("Please enter a storage volume name (e.g., storage01): ")
+        while not storage_vol_name:
+            storage_vol_name = raw_input("Please enter a storage volume name (e.g., storage01): ")
+        return storage_vol_name
+    def print_perpetual_eula(self):
+        perpetual_eula_path = '/var/www/perpetual_eula.txt'
+        os.system("more {}".format(perpetual_eula_path))
+
+    def print_trial_eula(self):
+        perpetual_eula_path = '/var/www/trial_eula.txt'
+        os.system("more {}".format(perpetual_eula_path))
+
+    def perpetual_license_agreement(self,trial):
+        self.print_perpetual_eula()
+        agree_perpetual = ""
+        agree_perpetual = raw_input("Do you agree the License Agreement (yes/no, default: no and press Enter): ")
+        while agree_perpetual != "no" and agree_perpetual !="" and agree_perpetual != "yes":
+            agree_perpetual = raw_input("Do you agree the License Agreement (yes/no, default: no and press Enter): ")
+        if agree_perpetual == "no" or agree_perpetual == "n" or agree_perpetual =="":
+            if trial == "trial":
+                print ""
+                #print "roll back to trial license"
+            else:
+                print "Exit"
+                sys.exit(0)
+        else:
+            agree_perpetual = 1
+            return agree_perpetual
+    def trial_license_agreement(self):
+        self.print_trial_eula()
+        agree_trial = ""
+        agree_trial = raw_input("Do you agree the Trial License Agreement (yes/no, default: no and press Enter): ")
+        while agree_trial != "no" and agree_trial !="" and agree_trial != "yes":
+            agree_trial = raw_input("Do you agree the Trial License Agreement (yes/no, default: no and press Enter): ")
+        if agree_trial == "no" or agree_trial == "n" or agree_trial =="":
+            print "Exit"
+            sys.exit(0)
+        else:
+            agree_trial = 1
+            return agree_trial
+
+    def set_eula_agree_type(self, agree_type):
+        """ set what EULA type user has agreed
+        agree_type: "trial" or "perpetual"
+        """
+        with open(agree_path, 'w') as f:
+            f.write(agree_type)
+        if agree_type == "trial":
+            shutil.copy(trial_eula, eula)
+        elif agree_type == "perpetual":
+            shutil.copy(perpetual_eula, eula)
+
+    def get_eula_agree_type(self):
+        """ get EULA type user has agreed
+        return none if user doesn't agree any
+        return "trial" if user agree trial eula
+        return "perpetual" if user agree perpetual eula
+        """
+        agree_type = ""
+        try:
+            with open(agree_path) as f:
+                agree_type = f.read().strip()
+        except Exception:
+            agree_type = ""
+
+        return agree_type
+    def get_productname(self):
+        productNamePath = ("/tmp/productname")
+        productnameFileExisted = os.path.isfile(productNamePath)
+        if productnameFileExisted:
+            productname = do_cmd("cat {}".format(productNamePath))
+            productname = productname.rstrip()
+        else:
+            productname = do_cmd("/promise/bin/amidelnx/amidelnx_26_64 /SP | grep SP |grep \"R\"| sed \'s/.*Done   //\'| awk -F\'\"\' \'{print $2}\' ")
+            productname = productname.rstrip()
+            os.system("echo {} > {}".format(productname, productNamePath))
+        return productname
+    def set_hostname(self, hostname):
+        hostname_path = "/etc/hostname"
+        hosts_file = '/etc/hosts'
+        cur_hostname = do_cmd("hostname")
+        cur_hostname = cur_hostname.rstrip()
+        #print "Old hostname: " + cur_hostname
+        # /etc/hosts hostname may be different from /etc/hostname, so hostname needs to be get again
+        hosts_cur_hostname = do_cmd("cat /etc/hosts |grep 127.0.1.1 | awk '{print $2}'")
+        hosts_cur_hostname = hosts_cur_hostname.rstrip()
+        if hostname:
+            #change /etc/hosts hostname
+            if hosts_cur_hostname and hostname != hosts_cur_hostname:
+                os.system("sed -i s/\"^127.0.1.1.*\"/\"127\.0\.1\.1\\t{}\"/g /etc/hosts".format(hostname))
+		print("Changed hostname, restart networking...")
+		#logger.info("Changed hostname, restart networking...")
+		do_cmd("/etc/init.d/networking restart")
+            #change /etc/hostname hostname
+            if hostname != cur_hostname:
+                #set hostname
+                do_cmd("hostname {}".format(hostname))
+                do_cmd("echo {} > {}".format(hostname, hostname_path))
+    def get_hostname(self):
+        hostname = do_cmd("hostname")
+        hostname = hostname.rstrip()
+        return hostname
+    def check_trial_license(self):
+        licensePath = ("/etc/ezs3/license")
+        licenseFileExisted = os.path.isfile(licensePath)
+        if licenseFileExisted:
+            file1 = open (licensePath, "r")
+            for line in file1:
+                if re.search("trial", line):
+                    return 1
+            return 0
+        else:
+            return 0 #license not existed
+
+    def activate_trial_license(self):
+        is_license = self.check_trial_license()
+        if not is_license:
+            #print "activate trial0 license"
+            try:
+                do_cmd("rm /etc/ezs3/license")
+            except:
+                print "/etc/ezs3/license does not exist."
+            do_cmd("activate_license -k CLLT3L-CSKKEY-2B1MWZ-TP2FGO-1BL8ZY-FF0U08-CIWNIA -f trial0")
+        else:
+            print "License existed"
+    #Version 1.6 or later no call this function
+    def rescan_multipath(self):
+        sg = do_cmd("lsscsi -g |grep /dev/sg | grep Promise |awk  '{ print $8}' | cut -c6-8")
+        host = do_cmd("ls -l /sys/class/fc_host | grep host | awk '{print $9}'")
+        #print s
+        sg_l = []
+        host_l = []
+        host_l.append(host.splitlines()[0])
+        host_l.append(host.splitlines()[1])
+        sg_l.append(sg.splitlines()[0])
+        sg_l.append(sg.splitlines()[1])
+        for l in sg_l:
+            do_cmd("echo \"1\" > /sys/class/scsi_generic/{}/device/delete".format(l))
+    #        print l
+        #print "echo \"- - -\" > /sys/class/scsi_host/hostx/scan"
+        for k in host_l:
+           do_cmd("echo \"- - -\" > /sys/class/scsi_host/{}/scan".format(k))
+
+    def set_RAID(self, productname):	    
+        #phdrv_count_A1100 = self.count_phydrv_A1100()
+        print "Setting RAID..."
+        logger.info("Setting RAID...")
+        #if productname == A1100_productname:
+        if A1100_productname in productname:
+            phdrv_count_A1100 = self.count_phydrv_A1100()
+            #is_OK_1_array = do_cmd("cliib -u admin -p password -C array -a list |grep -E '0'.*'OK' |  awk '{ print $2}' | head -n 1")
+            is_OK_1_array = do_cmd("cliib -u admin -p password -C array -a list |grep -E *'OK' |  awk '{ print $2}'")
+            is_OK_1_spare = do_cmd("cliib -u admin -p password -C spare |grep -E *'OK' |  awk '{ print $2}'")
+            #if is_OK == "OK\n":
+            #    print("RAID existed")
+            if phdrv_count_A1100 ==16:
+                #is_OK_1_array = do_cmd("cliib -u admin -p password -C array -a list |grep -E '0'.*'OK' |  awk '{ print $2}' | head -n 1")
+                if is_OK_1_array == "OK\n":
+                    print("RAID existed")
+                else:
+                    do_cmd("cliib -u admin -p password -C array -a add -p1~15 -l\\\"raid=5\\\"")
+                    #self.rescan_multipath()
+            elif phdrv_count_A1100 ==32:
+                if is_OK_1_array == "OK\nOK\n":#need to grep and check 2 OK in the future 
+                    print("RAID existed")
+                else:
+                    do_cmd("cliib -u admin -p password -C array -a add -p1~15 -l\\\"raid=5\\\"")                
+                    do_cmd("cliib -u admin -p password -C array -a add -p17~31 -l\\\"raid=5\\\"")
+                    #self.rescan_multipath()
+            elif  phdrv_count_A1100 ==48:
+                if is_OK_1_array == "OK\nOK\nOK\n":#need to grep and check 3 OK in the future 
+                    print("RAID existed")
+                else:
+                    do_cmd("cliib -u admin -p password -C array -a add -p1~15 -l\\\"raid=5\\\"")                
+                    do_cmd("cliib -u admin -p password -C array -a add -p17~31 -l\\\"raid=5\\\"")
+                    do_cmd("cliib -u admin -p password -C array -a add -p33~47 -l\\\"raid=5\\\"")
+                    #self.rescan_multipath()
+            elif  phdrv_count_A1100 ==64:
+                if is_OK_1_array == "OK\nOK\nOK\nOK\n":#need to grep and check 4 OK in the future 
+                    print("RAID existed")
+                else:
+                    do_cmd("cliib -u admin -p password -C array -a add -p1~15 -l\\\"raid=5\\\"")                
+                    do_cmd("cliib -u admin -p password -C array -a add -p17~31 -l\\\"raid=5\\\"")
+                    do_cmd("cliib -u admin -p password -C array -a add -p33~47 -l\\\"raid=5\\\"")
+                    do_cmd("cliib -u admin -p password -C array -a add -p49~63 -l\\\"raid=5\\\"")
+                    #self.rescan_multipath()
+            else:
+                print("Number of physical drives are not correct, needs to be full of drives.")
+                sys.exit(0)
+            #spare drive
+            if phdrv_count_A1100 ==16:
+                is_OK_1_spare = do_cmd("cliib -u admin -p password -C spare |grep -E '0'.*'OK' |  awk '{ print $2}' | head -n 1")
+                if is_OK_1_spare == "OK\n":
+                    print("Hot spare drive existed")
+                else:
+                    do_cmd("cliib -u admin -p password -C spare -a add -p 16 -t g -r y")
+            elif phdrv_count_A1100 ==32:
+                if is_OK_1_spare == "OK\nOK\n":#need to grep and check 2 OK in the future
+                    print("Hot spare drive existed")
+                else:
+                    do_cmd("cliib -u admin -p password -C spare -a add -p 16 -t g -r y")
+                    do_cmd("cliib -u admin -p password -C spare -a add -p 32 -t g -r y")
+            elif phdrv_count_A1100 ==48:
+                if is_OK_1_spare == "OK\nOK\nOK\n":#need to grep and check 3 OK in the future
+                    print("Hot spare drive existed")
+                else:
+                    do_cmd("cliib -u admin -p password -C spare -a add -p 16 -t g -r y")
+                    do_cmd("cliib -u admin -p password -C spare -a add -p 32 -t g -r y")
+                    do_cmd("cliib -u admin -p password -C spare -a add -p 48 -t g -r y")
+            elif phdrv_count_A1100 ==64:
+                if is_OK_1_spare == "OK\nOK\nOK\nOK\n":#need to grep and check 4 OK in the future
+                    print("Hot spare drive existed")
+                else:
+                    do_cmd("cliib -u admin -p password -C spare -a add -p 16 -t g -r y")
+                    do_cmd("cliib -u admin -p password -C spare -a add -p 32 -t g -r y")
+                    do_cmd("cliib -u admin -p password -C spare -a add -p 48 -t g -r y")
+                    do_cmd("cliib -u admin -p password -C spare -a add -p 64 -t g -r y")
+            else:
+                print("Number of physical drives are not correct, needs to be full of drives.")
+                sys.exit(0)
+                
+        else:#A1970
+            is_VD = do_cmd("{}/check_mcli_array.sh".format(exe_path))
+            #phydrv_count_A1970 = self.count_phydrv_A1970()
+            #print "call count pd"
+            if is_VD == "VD\nVD\nVD\n":
+                print("RAID existed")
+            #elif phydrv_count_A1970 == 35:
+            else:# do not  ccj
+                FNULL = open(os.devnull, 'w')
+                retcode = subprocess.call(['./run_mcli.sh'], stdout=FNULL, stderr=subprocess.STDOUT)
+                if retcode == 0:
+                    print "Setting RAID done"
+                    logger.info("Setting RAID done")
+                else:
+                    print "Setting RAID failed, please check physical drives status."
+                    logger.info("Setting RAID failed, please check physical drives status.")
+                    sys.exit(0)
+                    
+    def count_dev_mapper(self):
+        #print "count_dev_mapper"
+        dev_path = self.get_dev_path()
+        l_dev_path = len(dev_path)
+        logger.info("count_dev_mapper: {}".format(l_dev_path))
+        return l_dev_path
+    def check_dev_mapper_A1100(self):
+        if self.count_dev_mapper() == 1 and self.count_phydrv_A1100()==16:
+            return 1
+        elif self.count_dev_mapper() == 2 and self.count_phydrv_A1100()==32:
+            return 1
+        elif self.count_dev_mapper() == 3 and self.count_phydrv_A1100()==48:
+            return 1
+        elif self.count_dev_mapper() == 4 and self.count_phydrv_A1100()==64:
+            return 1
+        #elif self.count_dev_mapper() == 1 and self.count_phydrv_A1100()==13:#andy test version
+        #    return 1
+        else:
+            return 0
+    def check_dev_mapper_A1970(self):
+        if self.count_dev_mapper() == 3 and self.count_phydrv_A1970() ==35:
+            return 1
+        elif self.count_dev_mapper() == 6 and self.count_phydrv_A1970() ==70:
+            return 1
+        elif self.count_dev_mapper() == 9 and self.count_phydrv_A1970() ==105:
+            return 1
+        elif self.count_dev_mapper() == 12 and self.count_phydrv_A1970() ==140:
+            return 1
+        else:
+            return 0
+        
+    def check_RAID(self, productname):
+#        if productname == A1100_productname:
+        if A1100_productname in productname:
+            is_OK = do_cmd("cliib -u admin -p password -C array -a list |grep -E '0'.*'OK' |  awk '{ print $2}' | head -n 1")
+            is_OK2 = do_cmd("cliib -u admin -p password -C spare |grep -E '0'.*'OK' |  awk '{ print $2}' | head -n 1")
+            if is_OK == "OK\n" and is_OK2 == "OK\n":
+                return 1
+            else:
+                return 0
+        else:#A1970
+            is_VD = do_cmd("{}/check_mcli_array.sh".format(exe_path))
+            if is_VD == "VD\nVD\nVD\n":
+                return 1
+            else:
+                return 0
+    def check_is_chassis(self):
+        is_chassis = raw_input("Do you want to enable chassis-aware replication instead of host-aware (yes/no, or accept the default: 'no' and press Enter): ")
+        while is_chassis != "yes" and is_chassis != "" and is_chassis != "no":
+            is_chassis = raw_input("Do you want to enable chassis-aware replication instead of host-aware (yes/no, or accept the default: 'no' and press Enter): ")
+        if is_chassis == "" or is_chassis == "no":
+            is_chassis = 0
+        elif is_chassis == "yes":
+            is_chassis = 1
+        return is_chassis
+    def check_nic_confirm(self):
+        nic_confirm = raw_input("Please enter yes/no default: yes and press enter: ")
+        while nic_confirm != "yes" and nic_confirm != "" and nic_confirm != "no":
+            nic_confirm = raw_input("Please enter yes/no default: yes and press enter: ")
+        if nic_confirm == "no":
+            nic_confirm = 0
+        elif nic_confirm == "yes" or nic_confirm == "":
+            nic_confirm = 1
+        return nic_confirm
+#    def set_network(self):
+    def get_interfaces(self):
+        config = UbuntuNetworkConfig()
+        conf_bond_ifaces = config.get_bond_iface()  # /etc/network/interface
+        all_bond_ifaces = get_bond_interfaces() # /sys/class/net/bonding_master
+        ifaces = get_network_interfaces()
+        if len(ifaces) == 0:
+            raise RuntimeError("No interface found")
+
+        # remove all bonding slaves
+        for master in conf_bond_ifaces:
+            for slave in conf_bond_ifaces[master]["slaves"]:
+                ifaces.remove(slave)
+        # remove all undefined bonding masters since remove it from interface
+        # file and stop networking does not remove it from system
+        for master in all_bond_ifaces:
+            if master in ifaces and not conf_bond_ifaces.has_key(master):
+                ifaces.remove(master)
+        if_list = []
+        for iface in ifaces:
+            if conf_bond_ifaces.has_key(iface):
+                if_list.append((
+                    "{:<66}".format(
+                        "{:6}: {:18} bonding interface by [{}] (link: {})".format(
+                            iface,
+                            get_interface_ipv4(iface),
+                            ", ".join(conf_bond_ifaces[iface]["slaves"]),
+                            "on" if get_interface_status(iface) else "off"
+                        )
+                    )#,
+                    #iface
+                ))
+            else:
+                (vendor, mac, link) = get_interface_info(iface)
+                logger.debug(
+                    "got interface info for {}: {}:{}:{}:{}".format(
+                        iface, vendor, get_interface_ipv4(iface), mac, link
+                    )
+                )
+                if_list.append((
+                    "{:<66}".format(
+                        "{:6}: {:18} [{}] (link: {})".format(
+                            iface, get_interface_ipv4(iface), mac, link
+                        )
+                    )#,
+                    #iface
+                ))
+        return if_list, ifaces
+
+    def create_puresw_volume(self,dev_path, storage_vol_name):
+        print "creating storage volume..."
+        os.system("{}/create_volume -p {} -n {}".format(exe_path, dev_path , storage_vol_name))
+    def create_volume(self):    
+        print "creating storage volume..."
+        storage_path = "/etc/ezs3/storage.conf"
+        storage_path_existed = os.path.isfile(storage_path)
+        if not storage_path_existed:
+            do_cmd("echo \"[]\" > /etc/ezs3/storage.conf")
+        size_storage_file = os.path.getsize('/etc/ezs3/storage.conf')
+        if A1100_productname in productname:
+            dev_mapper_path = self.get_dev_path()
+            if (size_storage_file <4):#if /etc/ezs3/storage.conf no storage configuration
+                #os.system("/root/cluster_wizard/create_volume -p %s -n %s" %(dev_mapper_path , storage_vol_name))
+                if self.check_dev_mapper_A1100():
+                    i=0
+                    for dmp in dev_mapper_path:
+                        os.system("{}/create_volume -p {} -n {}-{}".format(exe_path, dmp , storage_vol_name, i))
+                        i = i+1
+                        print ""
+                    #os.system("./create_volume -p %s -n %s" %(dev_mapper_path , storage_vol_name))
+                    #print ""
+                    print "Creating storage volume done "
+                else:
+                    print "Number of device mapper: {}".format(self.count_dev_mapper())
+                    print "Number of drive: {}".format(self.count_phydrv_A1100())
+                    print "Number of device mapper or physical drives is incorrect, please check it."
+                    sys.exit(0)
+            else:
+                print "Storage volume exsisted"
+        else:#A1970
+            dev_mapper_path_A1970 = self.get_dev_path_A1970()
+            if (size_storage_file <4):#if /etc/ezs3/storage.conf no storage configuration
+                #if self.check_dev_mapper_A1970():
+                i=0
+                for dmpA in dev_mapper_path_A1970:
+                    #do_cmd("/root/cluster_wizard/create_volume -p {} -n {}{}".format(dmpA , storage_vol_name, i))
+                    os.system("{}/create_volume -p {} -n {}-{}".format(exe_path, dmpA , storage_vol_name, i))
+                    i = i+1
+                    print ""
+                print "Creating storage volume done "
+            else:
+                print "Storage volume exsisted"
+    def check_cluster_existed(self):
+        enabledRolesFileExisted = os.path.isfile("/etc/ezs3/enabled_roles")
+        if enabledRolesFileExisted:
+            enabledRoles = do_cmd("cat /etc/ezs3/enabled_roles")
+            enabledRoles = enabledRoles.rstrip()
+        if enabledRoles == "ezs3 ezgateway" or  enabledRoles == "ezs3" or enabledRoles == "quorum":
+            return 1
+        else: 
+            return 0
+    def create_puresw_cluster(self, cluster_name, replication, is_chassis, pub_nic, storage_nic):
+        is_clus_existed = self.check_cluster_existed()
+        if is_clus_existed:
+            print "Cluster existed"
+        else:
+            print "Creating a cluster..."
+            print "Please wait..."
+            #if productname == A1100_productname:
+            if is_chassis:
+                os.system("{}/create_cluster -p {} -s {} -n {} -r {} -c".format(exe_path, pub_nic, storage_nic, cluster_name, replication))
+            else: #not chassis-aware
+                os.system("{}/create_cluster -p {} -s {} -n {} -r {}".format(exe_path, pub_nic, storage_nic, cluster_name, replication))
+            print ""
+
+    def create_cluster(self, cluster_name, replication, is_chassis):
+        is_clus_existed = self.check_cluster_existed()
+        if is_clus_existed:
+            print "Cluster existed"
+        else:
+            print "Creating a cluster..."
+            print "Please wait..."
+            #if productname == A1100_productname:
+            if A1100_productname in productname:
+                if is_chassis:
+                    os.system("{}/create_cluster -p bond0 -s bond1 -n {} -r {} -c".format(exe_path, cluster_name, replication))
+                else: #not chassis-aware
+                    os.system("{}/create_cluster -p bond0 -s bond1 -n {} -r {}".format(exe_path, cluster_name, replication))
+                print ""
+            else: #A1970
+                if is_chassis:
+                    os.system("{}/create_cluster -p bond0 -s bond1 -n {} -r {} -c".format(exe_path, cluster_name, replication))
+                else: #not chassis-aware
+		            os.system("{}/create_cluster -p bond0 -s bond1 -n {} -r {}".format(exe_path, cluster_name, replication))
+                print ""
+                #print "Creating a cluster done"
+    
+    def join_puresw_cluster(self, join_cluster_name, pub_nic, storage_nic):
+        enabledRolesFileExisted = os.path.isfile("/etc/ezs3/enabled_roles")
+        if enabledRolesFileExisted:
+            enabledRoles = do_cmd("cat /etc/ezs3/enabled_roles")
+            enabledRoles = enabledRoles.rstrip()
+        if enabledRoles == "ezs3 ezgateway" or  enabledRoles == "ezs3":
+            print "cluster existed"
+        else:
+            print "joining a cluster {}...".format(join_cluster_name)
+            #do_cmd("/root/cluster_wizard/join_cluster -p bond0 -s bond1 -n {}").format(join_cluster_name)
+            os.system("{}/join_cluster -p {} -s {} -n {}".format(exe_path, pub_nic, storage_nic, join_cluster_name))
+            print ""
+            print "joining a cluster {} done".format(join_cluster_name)
+    
+    def join_cluster(self, join_cluster_name):
+        enabledRolesFileExisted = os.path.isfile("/etc/ezs3/enabled_roles")
+        if enabledRolesFileExisted:
+            enabledRoles = do_cmd("cat /etc/ezs3/enabled_roles")
+            enabledRoles = enabledRoles.rstrip()
+        if enabledRoles == "ezs3 ezgateway" or  enabledRoles == "ezs3":
+            print "cluster existed"
+        else:
+            print "joining a cluster {}...".format(join_cluster_name)
+            #if productname == A1100_productname:
+            if A1100_productname in productname:
+                #do_cmd("/root/cluster_wizard/join_cluster -p bond0 -s bond1 -n {}").format(join_cluster_name)
+                os.system("{}/join_cluster -p bond0 -s bond1 -n {}".format(exe_path, join_cluster_name))
+                print ""
+                print "joining a cluster {} done".format(join_cluster_name)
+            else: #A1970
+                os.system("{}/join_cluster -p bond0 -s bond1 -n {}".format(exe_path, join_cluster_name))
+                print ""
+                print "joining a cluster {} done".format(join_cluster_name)
+                
+                #print "Creating a cluster done"
+    def join_quorum(self, join_cluster_name, storage_nic):
+        #print"join_quorum needs to be done"
+        enabledRolesFileExisted = os.path.isfile("/etc/ezs3/enabled_roles")
+        if enabledRolesFileExisted:
+            enabledRoles = do_cmd("cat /etc/ezs3/enabled_roles")
+            enabledRoles = enabledRoles.rstrip()
+        if enabledRoles == "ezs3 ezgateway" or  enabledRoles == "ezs3" or enabledRoles == "quorum":
+            print "cluster existed"
+        else:
+            print "joining the quorum to cluster {}...".format(join_cluster_name)
+            #if productname == A1100_productname:
+            if True:
+                os.system("{}/join_quorum -p {} -s {} -n {}".format(exe_path, storage_nic, storage_nic, join_cluster_name))
+                print ""
+                print "joining quorum to a cluster {} done".format(join_cluster_name)
+                
+
+
+    def search_name_join_cluster(self, storage_nic):
+        s = ClusterSearcher()
+        #storage_nic =  "bond1"
+        print "Searching for existing clusters..."
+        clusters = s.search(storage_nic, 5)
+        cluster_names = clusters.keys()
+        print ""
+        print "Select a cluster to join:"
+        for i in range(len(cluster_names)):
+            print "{}".format(cluster_names[i])
+        print ""
+        return cluster_names
+    def search_name_conflict(self, storage_nic, cluster_name):
+	s = ClusterSearcher()
+        print "Searching existing clusters to prevent name conflict..."
+	clusters = s.search(storage_nic, 5)
+	cluster_names = [x.lower() for x in clusters]
+	if cluster_name in cluster_names:
+	    return 1
+        else:
+	    return 0
+    #only get path of multipath dev
+    def get_dev_path(self):
+        s = []
+        for dev in parted.getAllDevices():
+            name = "{}: {}".format(os.path.basename(dev.path), dev.model)
+            size = int(dev.getSize())
+            #print name, size
+            if not "multipath" in name:
+                continue
+            #print dev.path
+            s.append(dev.path)
+        return s
+    #NOT CALLED### get all path of dev
+    def get_all_dev_path2(self):
+        s = []
+        print ""
+        for dev in parted.getAllDevices():
+            name = "{}: {}".format(os.path.basename(dev.path), dev.model)
+            size = int(dev.getSize())
+            print dev.path,"(", name, "size: ", size, ")"
+            #print dev.path
+            s.append(dev.path)
+        return s
+    def is_invalid_device(self, model):
+        logger.debug("device model: {}".format(model))
+        # valid device ex: 2226b0001556a79b4: Linux device-mapper (multipath)
+        if model.find("device-mapper") == -1:
+            return True
+        if model.find("multipath") == -1:
+            return True
+
+        return False
+
+    # get all path of dev
+    def get_all_dev_path(self):
+        self.load_setting()
+        choices = []
+        hide_device = True
+        try:
+            do_cmd("dpkg -l|grep multipath")
+        except:
+            hide_device = False
+        #print hide_device
+        for dev in parted.getAllDevices():
+            if hide_device and self.is_invalid_device(dev.model):
+                continue
+            if self.sv_mgr.dev_in_use(dev):
+                continue
+            if hide_device:
+               #name = "{}: {}".format(dev.path, dev.model)[20:-19];
+               name = "{}: {}".format(dev.path, dev.model);
+            else:
+                name = "{}: {}".format(dev.path, dev.model)[:30];
+            size = "{} MB".format(int(dev.getSize()))
+            txt = "{:<28}{:>16}".format(name, size)
+            choices.append((txt, dev.path))
+            #print partition if has it
+            try:
+                disk = parted.Disk(dev)
+                for p in disk.partitions:
+                    if self.sv_mgr.dev_in_use(p):
+                        continue
+                    if p.type not in [parted.PARTITION_NORMAL,
+                                      parted.PARTITION_LOGICAL]:
+                        continue
+
+                    name = "    partition {}".format(p.number)
+                    size = "{} MB".format(int(p.getSize()))
+                    txt = "{:<29}{:>16}".format(name, size)
+                    choices.append((txt, dev.path))
+            except:
+                pass
+        return choices
+    def get_dev_path_A1970(self):
+        s = []
+        for dev in parted.getAllDevices():
+            name = "{}: {}".format(os.path.basename(dev.path), dev.model)
+            size = int(dev.getSize())
+            #print name, size
+            if not "multipath" in name:
+                continue
+            #print dev.path
+            s.append(dev.path)
+        return s
+    def load_setting(self):
+        self.conf = Ezs3CephConfig()
+        self.sv_mgr = StorageVolumeManager()
+        self.cname = self.conf.get_cluster_name()
+        if self.conf.has_option('ezs3', 'partitions json'):
+            self._upgrade_cs51_setting()
+
+    def activate_perpetual_lic(self, is_connected):
+        license_type = self.check_crmlicfile_type()
+        if is_connected:
+            run_license = ""
+            run_license = raw_input("Run perpetual license activation?(yes/no, default: no)\n")
+            if not run_license:
+                run_license = "No"
+                print "{} run perpetual license activation".format(run_license)
+            if run_license == "yes" or run_license == "y":
+                print "retrieving licenese from CRM..."
+                logger.info("retrieving licenese from CRM...")
+                try:
+                    do_cmd("clm -a retrievelic")
+                except:
+                    print ("Retrieve license failed.")
+                print "activating license..."
+                logger.info("activating license...")
+                try:
+                    do_cmd("clm -a activatelic")
+                    return 1
+                except:
+                    print ("The perpetual license is not activated.")
+                    return 0
+        elif(license_type == "perpetual"):
+            print "activating license..."
+            logger.info("activating license...")
+            try:
+                do_cmd("clm -a activatelic")
+                return 1
+            except:
+                print ("The perpetual license is not activated.")
+                return 0
+
+        else:
+            print "\n------------------------------------------------------------------------------------\n"
+            print("No access from outside network, please contact PROMISE Tech. for perpetual license.")
+            print "\n------------------------------------------------------------------------------------\n"
+            return 0
+
+    def print_create_cluster_description(self):
+        c_j_cluster = "Use the \"create\" command to create the first node of a cluster. For all nodes added to the cluster, use the \"join\" command."
+        rep = "The replication number refers to the number of replicas of the data that are created. For example, a replication value of 1 means there is one original; 2 means there is one original and one copy (replica); 3 means there are two copies. The replication number must be at least one less or equal than the total number of nodes in the cluster. So, if you select a replication number of 3, there must be at least three nodes in the cluster."
+        rep_note = "NOTE: The replication number can be changed later in the Web GUI."
+        print "\nCreate a cluster:"
+        print textwrap.dedent(c_j_cluster)
+        print textwrap.dedent(rep)
+        print rep_note
+        print ""
+    def validate_all_conf(self, productname, hostname, pub_ip, netmask_pub_ip,gateway_pub_ip, dns_pub_ip, storage_ip, netmask_storage_ip, ntp_server, storage_vol_name, create_or_join, cluster_name, replication, is_chassis):
+        print ""
+        print "New settings:"
+        print "  Hostname: {}".format(hostname)
+        print "  Public ip: {}".format(pub_ip)
+        print "  Netmask of public network: {}".format(netmask_pub_ip)        
+        #if productname == "A1100":
+        if A1100_productname in productname:
+            print "  Public network ports: eth4, eth5 bond mode ALB"
+        elif A1970_productname in productname:
+            print "  Public network ports: eth1, eth2 bond mode ALB"
+        if gateway_pub_ip:
+            print "  Gateway of public network: {}".format(gateway_pub_ip)
+        if dns_pub_ip:
+            print "  Dns of public network: {}".format(dns_pub_ip)
+        print "  Cluster (private) ip: {}".format(storage_ip)
+        print "  Netmask of storage network: {}".format(netmask_storage_ip)
+        if A1100_productname in productname:
+            print "  Cluster (private) network ports: eth6, eth7 bond mode ALB"
+        elif A1970_productname in productname:
+            print "  cluster (private) network ports: eth3, eth4 bond mode ALB"
+
+        if ntp_server:
+            print "  Ntp server address: {}".format(ntp_server)
+        print "  Storage volume name: {}".format(storage_vol_name)
+        print "  Create or join cluster: {}".format(create_or_join)
+        if cluster_name:
+            print "  Cluster name: {}".format(cluster_name)
+        if replication:
+            print "  Replication number: {}".format(replication)
+        if create_or_join == "create" or create_or_join == "c":
+            if is_chassis:
+                print "  Chassis-aware: yes"
+            else:
+                print "  Chassis-aware: no"
+        print "  Default user name: admin"
+        print "  Default password: admin"
+        print ""
+    def validate_quorum_conf(self, hostname, storage_ip, netmask_storage_ip, ntp_server):
+        print ""
+        print "New settings:"
+        print "  Hostname: {}".format(hostname)
+        print "  Cluster (private) ip: {}".format(storage_ip)
+        print "  Netmask of cluster (private) network: {}".format(netmask_storage_ip)
+        if ntp_server:
+            print "  Ntp server address: {}".format(ntp_server)
+        print "  Default user name: admin"
+        print "  Default password: admin"
+        print ""
+    def validate_puresw_conf(self, productname, hostname, create_or_join, cluster_name, replication, is_chassis):
+        print ""
+        print "New settings:"
+        print "  Hostname: {}".format(hostname)
+#        print "  Storage volume name: {}".format(storage_vol_name)
+        print "  Create or join cluster: {}".format(create_or_join)
+        if cluster_name:
+            print "  Cluster name: {}".format(cluster_name)
+        if replication:
+            print "  Replication number: {}".format(replication)
+        if create_or_join == "create" or create_or_join == "c":
+            if is_chassis:
+                print "  Chassis-aware: yes"
+            else:
+                print "  Chassis-aware: no"
+        print "  Default user name: admin"
+        print "  Default password: admin"
+        print ""
+
+    def set_timezone(self):
+        print "Setting timezone..."
+        c_timezone = do_cmd("cat /etc/timezone")
+        c_timezone = c_timezone.rstrip()
+        print ("----------------------------------------------")
+        print ("The current timezone is {}".format(c_timezone))
+        print ("----------------------------------------------")
+        reset_tz = raw_input("Would you like to set timezone? (yes/no, default: no):\n")
+        if reset_tz == "yes" or reset_tz == "y":
+            os.system("dpkg-reconfigure tzdata")
+            #print "restart cron"
+            os.system("service cron restart")
+            "Setting timezone done"
+        else:
+            print "No set timezone"
+    def set_timezone_auto(self):# needs to access outside network
+        print "Setting timezone automatically..."
+        T_Z = do_cmd("wget -O - -q http://geoip.ubuntu.com/lookup | sed -n -e \'s/.*<TimeZone>\\(.*\\)<\\/TimeZone>.*/\\1/p\'")
+        T_Z = T_Z.rstrip()
+        os.system("cp /usr/share/zoneinfo/{} /etc/localtime".format(T_Z))
+        time.strftime('%X %x %Z')
+        os.environ['TZ'] = '{}'.format(T_Z)
+        time.tzset()
+        time.strftime('%X %x %Z')
+        #tz = get_localzone()
+        #print "tz: {}".format(tz)
+        os.system("echo {} >  /etc/timezone".format(T_Z))
+        new_time_zone = self.get_timezone()
+        print "Your time zone is {}.".format(new_time_zone)
+        #_timezone = do_cmd("cat /etc/timezone")
+        print "Setting timezone automatically done..."
+    def get_timezone(self):
+        c_timezone = do_cmd("cat /etc/timezone")
+        c_timezone = c_timezone.rstrip()
+        return c_timezone
+    def count_phydrv_A1100(self):
+        phydrv = do_cmd("cliib -u admin -p password -C phydrv")
+        #print phydrv
+        file_ = open('/tmp/cnt_drv', 'w')
+        file_.write("{}".format(phydrv))
+        line_count = 0
+        file_.close()
+        with open('/tmp/cnt_drv') as infp:
+            for line in infp:
+               if line.strip():
+                  line_count += 1
+        line_count = line_count-3
+        logger.info("count_phydrv_A1100: {}".format(line_count))
+        return line_count
+    # NO CALL
+    def count_phydrv_A1970(self):
+        phydrv = do_cmd("./count_mcli_pd.sh")###########need to change to absolute path #
+        phydrv = phydrv.rstrip()
+        count_phydrv= len(phydrv)-63 # 98 - 63 = 35 drives
+        return count_phydrv
+    def run_quorum(self, hostname, current_storage_ip, lnc, storage_nic):
+        print "Running join quorum"
+        # Input hostname
+        new_hostname = self.input_hostname(hostname)
+        # Input storage IP
+        storage_ip = self.input_storage_ip(current_storage_ip, lnc)
+        # Input netmask of the storage network
+        netmask_storage_ip = ""
+        netmask_storage_ip = self.input_netmask_storage(netmask_storage_ip)
+        # Input ntp server address
+        ntp_server = self.input_ntp_address(lnc)
+        #validate configuration
+        self.validate_quorum_conf(hostname, storage_ip, netmask_storage_ip, ntp_server)
+        #run wizard
+        run_wizard = raw_input("Would you like to join the quorun to a cluster? (yes/no or exit the wizard and press Enter):\n")
+        while run_wizard != "no" and run_wizard !="" and run_wizard != "yes":
+            run_wizard = raw_input("Would you like to join the quorum to a cluster? (yes/no or exit the wizard and press Enter):\n")
+        if not run_wizard:
+            run_wizard = "no"
+        if run_wizard == "no" or run_wizard == "n":
+            print "Exit"
+            sys.exit(0)
+        # run set network
+        print "Setting network..."
+        lnc.set_network_quorum(storage_ip, netmask_storage_ip, storage_nic)
+        #set ntp server
+        lnc.set_ntpserver(ntp_server)
+        print "Setting network done"
+        #check is conneted to outside network
+        is_connected = self.is_connected()
+        #set hostname
+        self.set_hostname(new_hostname)#
+        #set timezone
+        if is_connected:
+            self.set_timezone_auto()
+        else:
+            self.set_timezone()
+        #search name to join the cluster
+        cluster_names = cw.search_name_join_cluster(storage_nic)
+        join_cluster_name = raw_input("Please enter a cluster name you want to join (e.g., mycluster01) or search again and press Enter:\n")
+        if not join_cluster_name:
+            cluster_names = self.search_name_join_cluster(storage_nic)
+        while join_cluster_name not in cluster_names or not join_cluster_name:
+            join_cluster_name = raw_input("Please enter a valid cluster name above you want to join (e.g., mycluster01) or search again and press Enter:\n")
+            if not join_cluster_name:
+                cluster_names = self.search_name_join_cluster(storage_nic)
+        #join quorum
+        self.join_quorum(join_cluster_name, storage_nic)
+
+        sys.exit(0)    
+    def get_ip(self, nic):
+        c_ip = do_cmd("/sbin/ifconfig %s | grep \'inet addr:\' | cut -d: -f2 | awk \'{ print $1}\'" %(nic))
+        current_ip = c_ip.rstrip()
+        return current_ip
+    def check_nic_existed(self, nic):
+        return (os.path.exists("/sys/class/net/%s" %(nic)))
+    
+    def check_crmlicfile_type(self):
+        crmlicfilePath = ("/promise/license/crmlicfile")
+        crmlicfileExisted = os.path.isfile(crmlicfilePath)
+        if crmlicfileExisted:
+            file1 = open (crmlicfilePath, "r")
+            for line in file1:
+                if re.search("trial", line):
+                    return "trial"
+                elif re.search("nas", line) or re.search("object", line) or re.search("san", line):
+                    return "perpetual"
+            return 0 #not tiral, not perpetual
+        else:
+            return 0 #crmlicfile not existed
+    def check_crmlicfileExisted(self):
+        crmlicfilePath = ("/promise/license/crmlicfile")
+        crmlicfileExisted = os.path.isfile(crmlicfilePath)
+        return crmlicfileExisted
+    def get_node_model(self):
+        modelPath = ("/etc/ezs3/model")
+        modelFileExisted = os.path.isfile(modelPath)
+        if modelFileExisted:
+            node_model = do_cmd("cat /etc/ezs3/model").rstrip()
+        else:
+            node_model = "0"
+        return node_model
+    def confirm_eula(self, eula_type=""):
+        license_type = self.check_crmlicfile_type()
+        eula_agree_type = self.get_eula_agree_type()
+
+        if eula_type == "":
+            if license_type == 0:
+                if eula_agree_type == "":
+                    agree_trial = self.trial_license_agreement()
+                    if agree_trial:
+                        agree_type = "trial"
+                        self.set_eula_agree_type(agree_type)
+            elif license_type == "trial":
+                logger.info("agree type: {}".format(eula_agree_type))
+                if eula_agree_type == "": ####
+                    agree_trial = self.trial_license_agreement()
+                    if agree_trial:
+                        agree_type = "trial"
+                        self.set_eula_agree_type(agree_type)
+            else:#license type == perpetual
+                if eula_agree_type == "" or eula_agree_type =="trial":
+                    agree_type = "perpetual"
+                    agree_perpetual = self.perpetual_license_agreement(agree_type)
+                    if agree_perpetual:
+                        agree_type = "perpetual"
+                        self.set_eula_agree_type(agree_type)
+    def get_node_role(self):
+        node_role = do_cmd("cat /etc/ezs3/role").rstrip()
+	return node_role
+    def set_storage_volume_name(self):
+        # Input Storage volume
+        storage_vol_name = raw_input("Please enter a storage volume name (e.g., storage01):\n")
+        while not storage_vol_name:
+            storage_vol_name = raw_input("Please enter a storage volume name (e.g., storage01):\n")
+        return storage_vol_name
+    def get_storage_volumes(self):
+        self.load_setting()
+        svs = self.sv_mgr.get_storage_volumes()
+        print "Storage Volumes:"
+        for sv in svs:
+            print "   {:<35} {:>10} MB".format(
+                str(sv)[:35], int(sv.get_capacity("MB")))
+
+    def run_pure_sw(self, replication):
+        #confirm eula
+        self.confirm_eula("")
+        agree_type = cw.get_eula_agree_type()
+
+        #input hostname
+        new_hostname = self.input_hostname(hostname)
+        create_more_volumes = 1
+        dev_path_list = []
+        while create_more_volumes:
+            #get storage voulmes
+            self.get_storage_volumes()
+            create_more_volumes = raw_input("Would you like to create a new volume?(yes/no default: 'yes' and press Enter)\n")
+            if create_more_volumes == "no":
+                create_more_volumes = 0
+                break
+            else:
+                create_more_volumes = 1
+            storage_vol_name = self.set_storage_volume_name()
+            all_dev_path = self.get_all_dev_path()
+            for p, s in all_dev_path:
+                print p
+                dev_path_list.append(s)
+            dev_path = raw_input("Please enter a partition for storage volume {}. (e.g., /dev/sdb, or cancel)\n".format(storage_vol_name))
+            #################coninue
+            if dev_path == "cancel":
+                continue
+            while dev_path not in dev_path_list or not dev_path:
+                all_dev_path = self.get_all_dev_path()
+                dev_path = raw_input("Please enter a valid partition for storage volume {}. (e.g., /dev/sdb or cancel)\n".format(storage_vol_name))
+            #################coninue
+                if dev_path == "cancel":
+                    continue
+            print dev_path
+            self.create_puresw_volume(dev_path, storage_vol_name)
+            print ""
+            self.get_storage_volumes()
+            while create_more_volumes != "no" and create_more_volumes != "yes":
+                create_more_volumes = raw_input("Would you like to create more volumes?(yes/no default: 'yes' and press Enter)\n")
+            if create_more_volumes == "no":
+                create_more_volumes = 0
+            else:
+                create_more_volumes = 1
+        #print "end"
+        cw.print_create_cluster_description()
+        create_or_join = ""
+        while not create_or_join:
+            create_or_join = raw_input("Please enter \"create\" or \"join\" a cluster(e.g., create):\n")
+            if create_or_join == "create" or create_or_join == "c":
+                #cluster_name = raw_input("Please enter a cluster name (e.g., mycluster01):\n")
+                #while not cluster_name:
+                #    cluster_name = raw_input("Please enter a cluster name (e.g., mycluster01):\n")
+                cluster_name = ""
+                while replication !="1" and replication !="2" and replication !="3":
+                    replication = raw_input("Please enter a replication number (between 1 to 3) of object data (e.g., 2):\n")
+                is_chassis = cw.check_is_chassis()
+            elif create_or_join == "join" or create_or_join == "j":
+                create_or_join = "join"
+                join_cluster_name = ""
+            else:
+                create_or_join = ""
+        if create_or_join == "create" or create_or_join == "c":
+            #Create a cluster
+            cw.validate_puresw_conf(productname, hostname, create_or_join, cluster_name, replication, is_chassis)
+        else:
+            cw.validate_puresw_conf(productname, hostname, create_or_join, join_cluster_name, replication, is_chassis)
+        run_wizard = "no" #default not run
+        if create_or_join == "create" or create_or_join == "c":
+            run_wizard = raw_input("Would you like to {} a cluster {}? (yes/no or exit the wizard and press Enter):\n".format(create_or_join, cluster_name))
+            while run_wizard != "no" and run_wizard !="" and run_wizard != "yes":
+                run_wizard = raw_input("Would you like to {} a cluster {}? (yes/no or exit the wizard and press Enter):\n".format(create_or_join, cluster_name))
+        else:#join cluster
+            run_wizard = raw_input("Would you like to {} a cluster {}? (yes/no or exit the wizard and press Enter):\n".format(create_or_join, join_cluster_name))
+            while run_wizard != "no" and run_wizard !="" and run_wizard != "yes":
+                run_wizard = raw_input("Would you like to {} a cluster {}? (yes/no or exit the wizard and press Enter):\n".format(create_or_join, join_cluster_name))
+        if not run_wizard:
+            run_wizard = "no"
+        if run_wizard == "no" or run_wizard == "n":
+            print "Exit"
+            sys.exit(0)
+        #check is conneted to outside network
+        is_connected = cw.is_connected()
+        # activate license
+        cw.activate_license(agree_type)
+
+        #set hostname
+        cw.set_hostname(new_hostname)#
+        #set timezone
+        if is_connected:
+            cw.set_timezone_auto()
+        else:
+            cw.set_timezone()
+        #get interfaces
+        if_list, ifaces = cw.get_interfaces()
+        nic_confirm = 0
+        while not nic_confirm:
+            for i in if_list:
+                print i
+            pub_nic = raw_input("Please enter a public network interface (e.g., eth0):\n")
+            while pub_nic not in ifaces:
+                pub_nic = raw_input("Please enter a valid public network interface (e.g., eth0):\n")
+            for i in if_list:
+                print i
+            storage_nic = raw_input("Please enter a storage network interface (e.g., eth1):\n")
+            while storage_nic not in ifaces:
+                storage_nic = raw_input("Please enter a valid storage network interface (e.g., eth1):\n")
+            print "Public NIC : {}".format(pub_nic)
+            print "Storage NIC: {}".format(storage_nic)
+            nic_confirm = self.check_nic_confirm()
+
+        #enter cluster name and check if it conflicts.
+        if create_or_join == "create" or create_or_join == "c":
+            name_conflict = ""
+            #cluster_name = raw_input("Please enter a cluster name (e.g., mycluster01):\n")
+            #name_conflict = cw.search_name_conflict("bond1", cluster_name)
+            while not cluster_name or name_conflict: # and or no?
+                cluster_name = raw_input("Please enter a cluster name (e.g., mycluster01):\n")
+                if cluster_name:
+                    # need to change
+                    name_conflict = cw.search_name_conflict(storage_nic, cluster_name)
+                    if name_conflict:
+                        print "Cluster name conflicts. Please choose another name."
+        #search name to join the cluster
+        if create_or_join == "join" or create_or_join == "j":
+            cluster_names = cw.search_name_join_cluster(storage_nic)
+            join_cluster_name = raw_input("Please enter a cluster name you want to join (e.g., mycluster01) or search again and press Enter:\n")
+            if not join_cluster_name:
+                cluster_names = cw.search_name_join_cluster(storage_nic)
+            while join_cluster_name not in cluster_names or not join_cluster_name:
+                join_cluster_name = raw_input("Please enter a valid cluster name above you want to join (e.g., mycluster01) or search again and press Enter:\n")
+                if not join_cluster_name:
+                    cluster_names = cw.search_name_join_cluster(storage_nic)
+            #is_chassis = cw.check_is_chassis()
+            
+        # create volume
+        cw.create_volume()
+        if create_or_join == "create" or create_or_join == "c":
+            cw.create_puresw_cluster(cluster_name, replication, is_chassis, pub_nic, storage_nic)
+        else:
+            cw.join_cluster(join_cluster_name)
+            #print "join cluster"
+        print "Run the wizard done."
+                        
+    def activate_license(self, agree_type):
+        is_connected = self.is_connected()
+        license_type = self.check_crmlicfile_type()
+        if is_connected:
+            if agree_type == "trial":
+                #run activate perpetual license
+                is_perpetual = self.activate_perpetual_lic(is_connected)
+                if is_perpetual:
+                    agree_perpetual = self.perpetual_license_agreement(agree_type)
+                    if not agree_perpetual:
+                        print "Activating trial0 license..."
+                        logger.info("Activating trial0 license...")#    cw.activate_trial_license()
+                        self.activate_trial_license()
+                        logger.info("Activating trial0 license done")
+                    else: #agree perpetual and retrieve and activate sucessfully
+                        agree_type = "perpetual"
+                        cw.set_eula_agree_type(agree_type)
+                else:
+                    print "Activating trial0 license..."
+                    logger.info("Activating trial0 license...")#    cw.activate_trial_license()
+                    self.activate_trial_license()
+                    logger.info("Activating trial0 license done")
+            elif agree_type == "perpetual":#is_connected and update perpetual license
+                is_perpetual = self.activate_perpetual_lic(is_connected)
+
+        elif agree_type != "perpetual": #run activate trial license
+            print "Activating trial0 license..."
+            logger.info("Activating trial0 license...")#    cw.activate_trial_license()
+            self.activate_trial_license()
+            logger.info("Activating trial0 license done")
+        #need to check crmlicfile has pereptual license
+        elif agree_type == "perpetual":#crmlicfile has perpetual license
+            if license_type == "perpetual":
+                is_perpetual = self.activate_perpetual_lic(is_connected)
+
+if __name__ == "__main__":
+    version = "Cluster Wizard Version 1.8.16"
+    _parser = argparse.ArgumentParser()
+    _parser.add_argument('--version', '-v', help='Print version.', action='store_true')
+    _args = _parser.parse_args()
+    if _args.version:
+        print version
+        sys.exit(0)
+    print version
+    A1100_productname = "RS300-E8-RS4"
+    A1970_productname = "1970"
+    A1970_productname2 = "H3970"
+    exe_path = "/promise/bin"
+    is_chassis = ""
+    is_storage_nic = 0
+    #print A1100_productname
+    cw = ClusterWizard()
+    is_clus_existed = cw.check_cluster_existed()
+    node_role = cw.get_node_role()
+    node_model = cw.get_node_model()
+    if 'software' in node_model:
+        pure_sw = 1
+    else:
+        pure_sw = 0
+    if 'ezs3' in node_role:
+        is_quorum=0
+    elif 'quorum' in node_role:
+        is_quorum=1
+    if is_clus_existed:
+        print "Cluster existed."
+        print "Exit the wizard."
+        sys.exit(0)
+    replication = ""
+    EZLog.init_handler(
+        logging.DEBUG, "/var/log/ezcloudstor/promise.log"
+    )
+    productname = cw.get_productname()
+    if pure_sw:
+        print "Running software cluster wizard..."
+        logger.info("Running software cluster wizard...")
+    else:
+        print "Running cluster wizard..."
+        logger.info("Running cluster wizard...")
+    
+    #logger.info("Setting Network...")
+    lnc = Local_network_config()
+    netmask_pub_ip = "255.255.255.0"
+    netmask_storage_ip = "255.255.255.0"
+    #get hostname
+    hostname = cw.get_hostname()
+    if pure_sw:
+        cw.run_pure_sw(replication)
+        sys.exit(0)
+    if is_quorum:   
+        if is_storage_nic:
+            storage_nic = raw_input("Please enter storage nic? (E.g., bond1): ")
+            current_storage_ip=cw.get_ip(storage_nic)
+        #default bond1
+        eth4_existed = cw.check_nic_existed("eth4")
+        eth5_existed = cw.check_nic_existed("eth5")
+        if eth4_existed and eth5_existed:
+            storage_nic = "bond0"
+            current_storage_ip=cw.get_ip(storage_nic)
+        else:
+            print "Eth4 and eth5 are not detected, please check whether the cables are connected."
+            print "Exit the wizard."
+            sys.exit(0)
+        # call run_quorum
+        cw.run_quorum(hostname, current_storage_ip, lnc, storage_nic)
+    if A1100_productname in productname:
+        #check eth4~eth7 existed
+        eth4_existed = cw.check_nic_existed("eth4")
+        eth5_existed = cw.check_nic_existed("eth5")
+        eth6_existed = cw.check_nic_existed("eth6")
+        eth7_existed = cw.check_nic_existed("eth7")
+        if not eth4_existed or not eth5_existed or not eth6_existed or not eth7_existed:
+            print "Eth4, eth5, eth6, and eth7 are not detected, please check whether the cables are connected."
+            print "Exit the wizard."
+            sys.exit(0)
+    # Need to add A1970 case for elif
+    #agree_type = ""
+    cw.confirm_eula("")
+    agree_type = cw.get_eula_agree_type()
+    
+    current_pub_ip = cw.get_ip("bond0")
+    current_storage_ip = cw.get_ip("bond1")
+    # Input hostname
+    new_hostname = cw.input_hostname(hostname)
+    # Input pub IP
+    pub_ip = cw.input_pub_ip(current_pub_ip, lnc)
+    # Input netmask of the public network
+    netmask_pub_ip = cw.input_netmask_pub(netmask_pub_ip)
+    # Input gateway ip of the public network
+    gateway_pub_ip = cw.input_gateway_pub()
+    # Input dns ip of the public network
+    dns_pub_ip = cw.input_dns_pub()
+    # Input storage IP
+    storage_ip = cw.input_storage_ip(current_storage_ip, lnc)
+    # Input netmask of the storage network
+    netmask_storage_ip = cw.input_netmask_storage(netmask_storage_ip)
+    # Input ntp server address
+    ntp_server = cw.input_ntp_address(lnc)
+    # Input Storage volume name
+    storage_vol_name = cw.input_storage_volume()
+    # create or join a cluster
+    cw.print_create_cluster_description()
+    create_or_join = ""
+    while not create_or_join:
+        create_or_join = raw_input("Please enter \"create\" or \"join\" a cluster(e.g., create): ")
+        if create_or_join == "create" or create_or_join == "c":
+            cluster_name = ""
+            while replication !="1" and replication !="2" and replication !="3":
+                replication = raw_input("Please enter a replication number (between 1 to 3) of object data (e.g., 2): ")
+            is_chassis = cw.check_is_chassis()
+        elif create_or_join == "join" or create_or_join == "j":
+            create_or_join = "join"
+            join_cluster_name = ""
+        else:
+            create_or_join = ""
+
+    if not netmask_pub_ip:
+        netmask_pub_ip = "255.255.255.0"
+    if not netmask_storage_ip:
+        netmask_storage_ip = "255.255.255.0"
+    if create_or_join == "create" or create_or_join == "c":
+        #######CHANGE  
+        cw.validate_all_conf(productname, new_hostname, pub_ip, netmask_pub_ip,gateway_pub_ip, dns_pub_ip, storage_ip, netmask_storage_ip, ntp_server, storage_vol_name, create_or_join, cluster_name, replication, is_chassis)# create a cluster
+    else:#join
+        cw.validate_all_conf(productname, hostname, pub_ip, netmask_pub_ip,gateway_pub_ip, dns_pub_ip, storage_ip, netmask_storage_ip, ntp_server, storage_vol_name, create_or_join, join_cluster_name, replication, is_chassis)
+    run_wizard = "no" #default not run
+    # create a cluster
+    if create_or_join == "create" or create_or_join == "c":
+        run_wizard = raw_input("Would you like to {} a cluster {}? (yes/no or exit the wizard and press Enter): ".format(create_or_join, cluster_name))
+        while run_wizard != "no" and run_wizard !="" and run_wizard != "yes":
+            run_wizard = raw_input("Would you like to {} a cluster {}? (yes/no or exit the wizard and press Enter): ".format(create_or_join, cluster_name))
+    else:#join cluster
+        run_wizard = raw_input("Would you like to {} a cluster {}? (yes/no or exit the wizard and press Enter): ".format(create_or_join, join_cluster_name))
+        while run_wizard != "no" and run_wizard !="" and run_wizard != "yes":
+            run_wizard = raw_input("Would you like to {} a cluster {}? (yes/no or exit the wizard and press Enter): ".format(create_or_join, join_cluster_name))
+    if not run_wizard:
+        run_wizard = "no"
+    if run_wizard == "no" or run_wizard == "n":
+        print "Exit"
+        sys.exit(0)
+    # Running all configuration
+    # setting RAID
+    cw.set_RAID(productname)
+
+    # run set network
+    print "Setting network..."
+    lnc.set_network(pub_ip, netmask_pub_ip,gateway_pub_ip,dns_pub_ip,  storage_ip, netmask_storage_ip, productname, A1100_productname)
+    #set ntp server
+    lnc.set_ntpserver(ntp_server)
+    print "Setting network done"
+    #check is conneted to outside network
+    is_connected = cw.is_connected()
+    #activate license
+    cw.activate_license(agree_type)
+    #set hostname
+    cw.set_hostname(new_hostname)#
+    #set timezone
+    if is_connected:
+        cw.set_timezone_auto()
+    else:
+        cw.set_timezone()
+    #enter cluster name and check if it conflicts.
+    if create_or_join == "create" or create_or_join == "c":
+	name_conflict = ""
+        #cluster_name = raw_input("Please enter a cluster name (e.g., mycluster01):\n")
+        #name_conflict = cw.search_name_conflict("bond1", cluster_name)
+	while not cluster_name or name_conflict: # and or no?
+	    cluster_name = raw_input("Please enter a cluster name (e.g., mycluster01): ")
+	    if cluster_name:
+                name_conflict = cw.search_name_conflict("bond1", cluster_name)
+	        if name_conflict:
+	            print "Cluster name conflicts. Please choose another name."
+		    print ""
+    #search name to join the cluster
+    if create_or_join == "join" or create_or_join == "j":        
+        cluster_names = cw.search_name_join_cluster("bond1")
+        join_cluster_name = raw_input("Please enter a cluster name you want to join (e.g., mycluster01) or search again and press Enter: ")
+        if not join_cluster_name:
+            cluster_names = cw.search_name_join_cluster("bond1")
+        while join_cluster_name not in cluster_names or not join_cluster_name:
+            join_cluster_name = raw_input("Please enter a valid cluster name above you want to join (e.g., mycluster01) or search again and press Enter: ")
+            if not join_cluster_name:
+                cluster_names = cw.search_name_join_cluster("bond1")
+    
+    # create volume
+    cw.create_volume()
+    if create_or_join == "create" or create_or_join == "c":
+        cw.create_cluster(cluster_name, replication, is_chassis)
+    else:
+        cw.join_cluster(join_cluster_name)
+        #print "join cluster"
+    print "Run the wizard done."
